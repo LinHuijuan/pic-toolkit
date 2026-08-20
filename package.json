@@ -1,0 +1,23 @@
+{
+  "name": "pic-toolkit",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "手机端本地图片工具箱：九宫格切图、添加水印，图片不上传服务器",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@imgly/background-removal": "^1.5.6",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.5",
+    "vite-plugin-pwa": "^0.21.1",
+    "vue-tsc": "^2.1.10"
+  }
+}
