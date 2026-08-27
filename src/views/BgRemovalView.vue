@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useImageDrop } from '../composables/useImageDrop'
+import { prepareAiModel } from '../utils/aiModel'
 import {
   loadImageFromFile,
   fileToDataUrl,
@@ -107,6 +108,9 @@ async function startRemove() {
   resultReady.value = false
   try {
     const dataUrl = await fileToDataUrl(await sourceFile())
+    // 先单独完成模型准备：进度写在共享状态上，用户切去其他工具也不会丢，
+    // 不必被这个页面的全屏进度条绑住
+    await prepareAiModel()
     const blob = await removeImageBackground(dataUrl, (p) => {
       progress.value = p
     })
@@ -246,7 +250,7 @@ onUnmounted(() => {
                   <button class="btn btn-sample" @click="loadSample">体验示例图</button>
                 </div>
         <p class="tip-text" style="max-width: 280px; text-align: center">
-          首次使用需下载 AI 模型（约 40MB），之后可离线使用。全程本地处理，图片不会上传。
+          首次使用需下载 AI 模型（约 42MB），仅一次、之后可离线使用。全程本地处理，图片不会上传。
         </p>
       </div>
 

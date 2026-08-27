@@ -1,37 +1,46 @@
 <script setup lang="ts">
-import { reactive } from 'vue'
-import { prepareAiModel, formatDuration, type AiModelProgress } from '../utils/aiModel'
+import { prepareAiModel, aiModel } from '../utils/aiModel'
+import { formatDuration } from '../utils/format'
+
+/** 工具标识：与 hash 路由的 #/工具名 一一对应 */
+type ToolKey =
+  | 'edit'
+  | 'grid'
+  | 'watermark'
+  | 'removeBg'
+  | 'compress'
+  | 'merge'
+  | 'format'
+  | 'collage'
+  | 'idPhoto'
+  | 'upscale'
+  | 'beauty'
+  | 'colorReplace'
 
 const emit = defineEmits<{
-  navigate: [view: 'edit' | 'grid' | 'watermark' | 'removeBg' | 'compress' | 'merge' | 'format' | 'collage' | 'idPhoto' | 'upscale' | 'beauty' | 'colorReplace']
+  navigate: [view: ToolKey]
 }>()
 
 /** 按设备显示 PWA 安装提示：移动端引导添加到主屏幕，PC 端引导浏览器安装 */
 const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
 
-/** 首页「预下载 AI 模型」状态（大小 / 时长 / 剩余时间实时展示） */
-const aiState = reactive<AiModelProgress>({
-  stage: 'idle',
-  percent: 0,
-  loadedMB: 0,
-  totalMB: 0,
-  elapsedMs: 0,
-  remainingSeconds: null,
-  message: '',
-})
+function startPreload() {
+  // 失败原因已写入共享状态，这里只需避免未处理的 rejection
+  prepareAiModel().catch(() => {})
+}
 
-async function startPreload() {
-  try {
-    aiState.stage = 'downloading'
-    await prepareAiModel((p) => Object.assign(aiState, p))
-  } catch (error) {
-    aiState.stage = 'error'
-    aiState.message = error instanceof Error ? error.message : '模型下载失败'
-  }
+interface ToolCard {
+  key: ToolKey
+  title: string
+  desc: string
+  grad: readonly [string, string]
+  iconBody: string
+  /** 首次使用需下载大体积模型的工具，把等待成本前置到点进去之前说明 */
+  badge?: string
 }
 
 /** 每个工具卡片独立的渐变配色：青 / 珊瑚橙 / 玫粉 / 草绿 / 天蓝 / 靛紫 / 紫罗兰 / 湖绿 / 明黄，打破"全是紫色" */
-const features = [
+const features: ToolCard[] = [
   {
     key: 'edit' as const,
     title: '图片编辑',
@@ -57,6 +66,7 @@ const features = [
     key: 'removeBg' as const,
     title: 'AI 抠图',
     desc: '一键去除背景，输出透明 PNG，可换背景色',
+    badge: '首次需下载 42MB',
     grad: ['#34d399', '#22c55e'] as const,
     iconBody: '<circle cx="6.5" cy="6.5" r="2.8"/><circle cx="6.5" cy="17.5" r="2.8"/><path d="M8.8 8.2 20.5 20M8.8 15.8 20.5 4"/>',
   },
@@ -78,6 +88,7 @@ const features = [
     key: 'idPhoto' as const,
     title: '证件照换底色',
     desc: 'AI 抠图一键换底，内置常见规格预设，支持一版多张打印',
+    badge: '复用同一 42MB 模型',
     grad: ['#c084fc', '#d946ef'] as const,
     iconBody: '<rect x="3.5" y="4.5" width="17" height="15" rx="3"/><circle cx="12" cy="10.5" r="2.8"/><path d="M7.5 17.5c.9-2 2.6-3 4.5-3s3.6 1 4.5 3"/>',
   },
@@ -99,6 +110,7 @@ const features = [
     key: 'upscale' as const,
     title: '超分辨率',
     desc: 'AI 本地放大提升清晰度，适合小图修复',
+    badge: '首次需下载 4.9MB',
     grad: ['#38bdf8', '#2563eb'] as const,
     iconBody: '<path d="M12 3.5c3.2 4.2 5.5 7.1 5.5 10a5.5 5.5 0 1 1-11 0c0-2.9 2.3-5.8 5.5-10Z"/><path d="M9.5 15.5h5M12 13v5"/>',
   },
@@ -106,6 +118,7 @@ const features = [
     key: 'beauty' as const,
     title: '美颜修图',
     desc: '本地人脸检测，磨皮提亮更自然',
+    badge: '首次需下载 3.6MB',
     grad: ['#f472b6', '#db2777'] as const,
     iconBody: '<path d="M12 4c2.8 3.7 5 6.5 5 9.3a5 5 0 1 1-10 0C7 10.5 9.2 7.7 12 4Z"/><path d="M8.8 13.5h6.4"/>',
   },
@@ -137,7 +150,7 @@ function iconSvg(item: (typeof features)[number]): string {
         </svg>
       </div>
       <h1 class="home-title">图片工具箱</h1>
-      <p class="home-subtitle">裁剪 · 切图 · 水印 · 抠图 · 压缩 · 拼图 · 证件照 · 转换</p>
+      <p class="home-subtitle">12 个图片工具全在你设备里跑完：图片不上传、不注册、打开即用</p>
     </div>
 
     <!-- 隐私承诺 -->
@@ -152,51 +165,55 @@ function iconSvg(item: (typeof features)[number]): string {
         <div class="ai-model-badge">⚡</div>
         <div>
           <div class="ai-model-title">AI 模型</div>
-          <div class="ai-model-desc">预下载抠图模型，闲时备好，用时即取</div>
+          <div class="ai-model-desc">抠图与证件照需要 42MB 模型，仅下载一次，之后离线可用</div>
         </div>
       </div>
 
-      <template v-if="aiState.stage === 'idle'">
+      <template v-if="aiModel.stage === 'idle'">
         <button class="btn btn-primary" style="width: 100%" @click="startPreload">预下载模型</button>
       </template>
-      <template v-else-if="aiState.stage === 'downloading' || aiState.stage === 'warming'">
+      <template v-else-if="aiModel.stage === 'downloading' || aiModel.stage === 'warming'">
         <div class="progress-track">
-          <div class="progress-fill" :style="{ width: aiState.percent + '%' }"></div>
+          <div class="progress-fill" :style="{ width: aiModel.percent + '%' }"></div>
         </div>
         <div class="ai-model-meta">
-          <span>{{ aiState.message }}</span>
-          <span v-if="aiState.totalMB > 0">{{ aiState.loadedMB.toFixed(1) }} / {{ aiState.totalMB.toFixed(1) }} MB</span>
-          <span v-else>{{ aiState.loadedMB.toFixed(1) }} MB</span>
+          <span>{{ aiModel.message }}</span>
+          <span v-if="aiModel.totalMB > 0">{{ aiModel.loadedMB.toFixed(1) }} / {{ aiModel.totalMB.toFixed(1) }} MB</span>
+          <span v-else>{{ aiModel.loadedMB.toFixed(1) }} MB</span>
         </div>
         <div class="ai-model-meta sub">
-          <span>已用 {{ formatDuration(aiState.elapsedMs) }}</span>
-          <span v-if="aiState.remainingSeconds != null">预计剩余 {{ formatDuration(aiState.remainingSeconds * 1000) }}</span>
+          <span>已用 {{ formatDuration(aiModel.elapsedMs) }}</span>
+          <span v-if="aiModel.remainingSeconds != null">预计剩余 {{ formatDuration(aiModel.remainingSeconds * 1000) }}</span>
         </div>
       </template>
-      <template v-else-if="aiState.stage === 'ready'">
+      <template v-else-if="aiModel.stage === 'ready'">
         <div class="ai-model-ready">模型已就绪 ✓</div>
       </template>
-      <template v-else-if="aiState.stage === 'error'">
-        <div class="ai-model-error">{{ aiState.message }}</div>
+      <template v-else-if="aiModel.stage === 'error'">
+        <div class="ai-model-error">{{ aiModel.message }}</div>
         <button class="btn btn-outline" style="width: 100%" @click="startPreload">重试</button>
       </template>
     </div>
 
-    <!-- 功能入口 -->
+    <!-- 功能入口：每项对应一个可独立分享的 hash 地址 -->
     <div class="feature-list">
-      <div
+      <a
         v-for="item in features"
         :key="item.key"
         class="feature-card"
+        :href="'#/' + item.key"
         :style="{ '--card-from': item.grad[0], '--card-to': item.grad[1] }"
-        @click="emit('navigate', item.key)"
+        @click.prevent="emit('navigate', item.key)"
       >
         <div class="feature-icon" v-html="iconSvg(item)"></div>
         <div class="feature-info">
-          <div class="feature-title">{{ item.title }}</div>
+          <div class="feature-title">
+            {{ item.title }}
+            <span v-if="item.badge" class="feature-badge">{{ item.badge }}</span>
+          </div>
           <div class="feature-desc">{{ item.desc }}</div>
         </div>
-      </div>
+      </a>
     </div>
 
     <!-- 底部说明（按设备显示安装提示） -->
@@ -362,6 +379,8 @@ function iconSvg(item: (typeof features)[number]): string {
   flex-direction: column;
   align-items: center;
   text-align: center;
+  color: inherit;
+  text-decoration: none;
   gap: 10px;
   background: rgba(255, 255, 255, 0.92);
   backdrop-filter: blur(12px);
@@ -438,6 +457,19 @@ function iconSvg(item: (typeof features)[number]): string {
 .feature-title {
   font-size: 15px;
   font-weight: 600;
+}
+
+/* 首次需下载模型的提示徽标：说明等待成本，但不抢标题重心 */
+.feature-badge {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 1px 6px;
+  border: 1px solid var(--card-from);
+  border-radius: 999px;
+  color: var(--card-to);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.5;
 }
 
 .feature-desc {

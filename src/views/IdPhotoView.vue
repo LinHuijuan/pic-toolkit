@@ -9,6 +9,7 @@ import {
   type LoadedImage,
 } from '../utils/imageLoader'
 import { removeImageBackground, composeBackground, composeBackgroundImage, type RemoveBgProgress } from '../utils/removeBg'
+import { prepareAiModel } from '../utils/aiModel'
 import { ID_PHOTO_SPECS, fitToSpec, layoutOnSheet } from '../utils/idPhoto'
 import { showToast } from '../utils/toast'
 import { fetchSampleFile } from '../utils/sampleImage'
@@ -167,6 +168,8 @@ async function startRemove() {
   resultReady.value = false
   try {
     const dataUrl = await fileToDataUrl(await sourceFile())
+    // 模型准备与 AI 抠图共用同一份共享状态与缓存，不重复下载
+    await prepareAiModel()
     const blob = await removeImageBackground(dataUrl, (p) => {
       progress.value = p
     })
@@ -349,7 +352,7 @@ onUnmounted(() => {
                   <button class="btn btn-sample" @click="loadSample">体验示例图</button>
                 </div>
         <p class="tip-text" style="max-width: 280px; text-align: center">
-          首次使用需下载 AI 模型（约 40MB），之后可离线使用。全程本地处理，照片不会上传。
+          首次使用需下载 AI 模型（约 42MB），仅一次、之后可离线使用。全程本地处理，照片不会上传。
         </p>
       </div>
 

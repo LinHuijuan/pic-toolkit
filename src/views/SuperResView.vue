@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useImageDrop } from '../composables/useImageDrop'
-import { loadImageFromFile, downloadCanvas, type LoadedImage } from '../utils/imageLoader'
-import { upscaleImage, SUPER_RESOLUTION_SCALE } from '../utils/superResolution'
+import { loadImageFromFile, canvasToBlob, downloadCanvas, type LoadedImage } from '../utils/imageLoader'
+import { upscaleImage, predictUpscaleOutput, MAX_INPUT_EDGE, SUPER_RESOLUTION_SCALE } from '../utils/superResolution'
 import { showToast } from '../utils/toast'
-import { fetchSampleFile } from '../utils/sampleImage'
+import { formatDuration } from '../utils/format'
+import { fetchSmallSampleFile } from '../utils/sampleImage'
 
 const emit = defineEmits<{ back: []; consumed: [] }>()
 const props = defineProps<{ incomingFile?: File | null }>()
@@ -19,6 +20,22 @@ const resultCanvas = ref<HTMLCanvasElement | null>(null)
 const resultUrl = ref('')
 const processing = ref(false)
 const progress = ref(0)
+/** 真实输出尺寸与倍率：大图受输出预算约束，实际倍率可能低于模型标称的 x4 */
+const outputInfo = ref<{ w: number; h: number; ratio: number; capped: boolean } | null>(null)
+
+/** 选完图就预告真实输出尺寸，不用等跑完才发现被降级 */
+const estimate = computed(() => {
+  const bitmap = source.value?.bitmap
+  return bitmap ? predictUpscaleOutput(bitmap.width, bitmap.height) : null
+})
+
+const elapsedMs = ref(0)
+let timer: number | undefined
+const remainingMs = computed(() => {
+  const p = progress.value
+  if (!processing.value || p < 15) return null
+  return Math.max(0, Math.round((elapsedMs.value / p) * (100 - p)))
+})
 
 /** 空状态渐变 SVG 图标（与首页功能卡片风格一致） */
 const STROKE = 'viewBox="0 0 24 24" fill="none" stroke="url(#icon-grad)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"'
@@ -28,24 +45,41 @@ async function processFile(file: File) {
   try {
     source.value = await loadImageFromFile(file)
     resultCanvas.value = null
-    resultUrl.value = ''
-    run()
+    outputInfo.value = null
+    if (resultUrl.value) {
+      URL.revokeObjectURL(resultUrl.value)
+      resultUrl.value = ''
+    }
+    // 不自动开跑：放大是重计算，必须由用户显式触发
   } catch (error) {
     showToast(error instanceof Error ? error.message : '图片加载失败', 'error')
   }
 }
 
 async function run() {
-  if (!source.value) return
+  if (!source.value || processing.value) return
   processing.value = true
   progress.value = 5
+  elapsedMs.value = 0
+  timer = window.setInterval(() => (elapsedMs.value += 100), 100)
   try {
-    const canvas = await upscaleImage(source.value.bitmap, (p) => (progress.value = p))
+    const bitmap = source.value.bitmap
+    const canvas = await upscaleImage(bitmap, (p) => (progress.value = p))
+    const full = canvas.width >= bitmap.width * SUPER_RESOLUTION_SCALE
     resultCanvas.value = canvas
-    resultUrl.value = canvas.toDataURL('image/png')
+    if (resultUrl.value) URL.revokeObjectURL(resultUrl.value)
+    resultUrl.value = URL.createObjectURL(await canvasToBlob(canvas, 'image/png', 1))
+    outputInfo.value = {
+      w: canvas.width,
+      h: canvas.height,
+      ratio: Math.round((canvas.width / bitmap.width) * 10) / 10,
+      capped: !full,
+    }
   } catch (error) {
     showToast(error instanceof Error ? error.message : '超分失败，请检查网络后重试（需下载模型）', 'error')
   } finally {
+    if (timer !== undefined) window.clearInterval(timer)
+    timer = undefined
     processing.value = false
   }
 }
@@ -56,7 +90,7 @@ function pickImage() {
 
 async function loadSample() {
   try {
-    const file = await fetchSampleFile('scene')
+    const file = await fetchSmallSampleFile('scene', 220)
     await processFile(file)
   } catch (error) {
     showToast(error instanceof Error ? error.message : '示例图加载失败', 'error')
@@ -73,7 +107,8 @@ function handleFileChange(event: Event) {
 
 function saveResult() {
   if (!source.value || !resultCanvas.value) return
-  downloadCanvas(resultCanvas.value, `${source.value.name}_x${SUPER_RESOLUTION_SCALE}.png`)
+  const ratio = outputInfo.value?.ratio ?? SUPER_RESOLUTION_SCALE
+  downloadCanvas(resultCanvas.value, `${source.value.name}_x${ratio}.png`)
   showToast('已开始下载', 'success')
 }
 
@@ -82,6 +117,11 @@ onMounted(() => {
     processFile(props.incomingFile).catch(() => showToast('图片加载失败', 'error'))
     emit('consumed')
   }
+})
+
+onUnmounted(() => {
+  if (timer !== undefined) window.clearInterval(timer)
+  if (resultUrl.value) URL.revokeObjectURL(resultUrl.value)
 })
 </script>
 
@@ -95,7 +135,8 @@ onMounted(() => {
     <div class="page-content">
       <div v-if="!source" class="empty-state">
         <div class="empty-icon" v-html="EMPTY_ICON"></div>
-        <div>选择一张小图，AI 本地放大提升清晰度</div>
+        <div>选一张小图（长边 {{ MAX_INPUT_EDGE }}px 内），本地放大 4 倍</div>
+        <p class="tip-text">首次需下载 4.9MB 模型，之后离线可用。</p>
         <div class="empty-actions">
           <button class="btn btn-primary" style="width: 180px" @click="pickImage">选择图片</button>
           <button class="btn btn-sample" @click="loadSample">体验示例</button>
@@ -109,15 +150,28 @@ onMounted(() => {
             <!-- 处理中显示进度占位 -->
             <div v-if="processing" class="upscale-loading">
               <div class="progress-track"><div class="progress-fill" :style="{ width: progress + '%' }"></div></div>
-              <p class="tip-text">AI 正在放大图片… {{ progress }}%</p>
+              <p class="tip-text">
+                AI 正在本地放大… {{ progress }}%（已用 {{ formatDuration(elapsedMs) }}<template v-if="remainingMs !== null">
+                  ，约再 {{ formatDuration(remainingMs) }}</template
+                >）
+              </p>
+              <p class="tip-text">分块推理，页面可以随时切走，不会卡住。</p>
             </div>
-            <!-- 完成后显示对比 -->
-            <div v-else-if="resultUrl" class="compare-wrap">
+            <!-- 完成后显示结果 -->
+            <div v-else-if="resultUrl && outputInfo" class="compare-wrap">
               <img :src="resultUrl" alt="超分结果" class="result-img" />
-              <p class="tip-text">已放大到原图 {{ SUPER_RESOLUTION_SCALE }} 倍，保存的原图按实际尺寸导出。</p>
+              <p class="tip-text">
+                已输出 {{ outputInfo.w }} × {{ outputInfo.h }}（较原图 ×{{ outputInfo.ratio }}）。
+                <template v-if="outputInfo.capped">源图长边超出预算，为保证速度按 {{ MAX_INPUT_EDGE }}px 上限收敛后再放大。</template>
+              </p>
             </div>
-            <div v-else class="upscale-wait">
-              <p class="tip-text">点击「开始超分」进行本地放大</p>
+            <div v-else-if="estimate" class="upscale-wait">
+              <p class="tip-text">
+                将输出 {{ estimate.w }} × {{ estimate.h }}（×{{ estimate.ratio }}）
+                <template v-if="estimate.shrunk">，源图超过长边预算，已按上限收敛</template>
+                。
+              </p>
+              <p class="tip-text">全程在你的设备上计算，图片不上传。</p>
             </div>
           </div>
           <div class="bottom-inline">
@@ -130,7 +184,7 @@ onMounted(() => {
     <div v-if="source" class="bottom-bar">
       <button class="btn btn-ghost" @click="pickImage">重新选图</button>
       <button class="btn btn-primary" :disabled="!resultUrl || processing" @click="saveResult">
-        保存超分图（x{{ SUPER_RESOLUTION_SCALE }}）
+        保存超分图{{ outputInfo ? `（x${outputInfo.ratio}）` : '' }}
       </button>
     </div>
 

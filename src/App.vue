@@ -1,18 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, watch, computed, defineAsyncComponent, onMounted, onUnmounted } from 'vue'
 import { DROP_EVENT } from './composables/useImageDrop'
-import HomeView from './views/HomeView.vue'
-import ImageEditView from './views/ImageEditView.vue'
-import GridSliceView from './views/GridSliceView.vue'
-import WatermarkView from './views/WatermarkView.vue'
-import BgRemovalView from './views/BgRemovalView.vue'
-import ImageCompressView from './views/ImageCompressView.vue'
-import CollageView from './views/CollageView.vue'
-import FormatConvertView from './views/FormatConvertView.vue'
-import IdPhotoView from './views/IdPhotoView.vue'
-import SuperResView from './views/SuperResView.vue'
-import BeautyView from './views/BeautyView.vue'
-import ColorReplaceView from './views/ColorReplaceView.vue'
+import { aiModel } from './utils/aiModel'
+import { formatDuration } from './utils/format'
 
 type ViewName =
   | 'home'
@@ -29,7 +19,65 @@ type ViewName =
   | 'beauty'
   | 'colorReplace'
 
-const currentView = ref<ViewName>('home')
+/* 视图按需拆包：只有真正进入某个工具时才下载它那份代码 */
+const HomeView = defineAsyncComponent(() => import('./views/HomeView.vue'))
+const ImageEditView = defineAsyncComponent(() => import('./views/ImageEditView.vue'))
+const GridSliceView = defineAsyncComponent(() => import('./views/GridSliceView.vue'))
+const WatermarkView = defineAsyncComponent(() => import('./views/WatermarkView.vue'))
+const BgRemovalView = defineAsyncComponent(() => import('./views/BgRemovalView.vue'))
+const ImageCompressView = defineAsyncComponent(() => import('./views/ImageCompressView.vue'))
+const CollageView = defineAsyncComponent(() => import('./views/CollageView.vue'))
+const FormatConvertView = defineAsyncComponent(() => import('./views/FormatConvertView.vue'))
+const IdPhotoView = defineAsyncComponent(() => import('./views/IdPhotoView.vue'))
+const SuperResView = defineAsyncComponent(() => import('./views/SuperResView.vue'))
+const BeautyView = defineAsyncComponent(() => import('./views/BeautyView.vue'))
+const ColorReplaceView = defineAsyncComponent(() => import('./views/ColorReplaceView.vue'))
+
+const VIEW_NAMES: ViewName[] = [
+  'home',
+  'edit',
+  'grid',
+  'watermark',
+  'removeBg',
+  'compress',
+  'merge',
+  'format',
+  'collage',
+  'idPhoto',
+  'upscale',
+  'beauty',
+  'colorReplace',
+]
+
+/** 各工具的文档标题：分享出去的链接在浏览器历史与标签页里可辨识 */
+const TITLES: Record<ViewName, string> = {
+  home: '图片工具箱 · 图片不离开你的设备',
+  edit: '图片编辑',
+  grid: '九宫格切图',
+  watermark: '添加水印',
+  removeBg: 'AI 抠图',
+  compress: '图片压缩',
+  merge: '长图拼接',
+  format: '图片格式转换',
+  collage: '网格拼图',
+  idPhoto: '证件照换底色',
+  upscale: '超分辨率放大',
+  beauty: '美颜修图',
+  colorReplace: '局部改色',
+}
+
+/** 用 hash 而非 history API：部署在 GitHub Pages 子路径下没有服务端重写，
+ *  刷新 /#removeBg 这类真实路径会 404，hash 则始终由同一个 index.html 承接。 */
+function hashOf(view: ViewName): string {
+  return view === 'home' ? '#/' : `#/${view}`
+}
+
+function parseHash(): ViewName {
+  const name = decodeURIComponent(location.hash.replace(/^#\/?/, ''))
+  return (VIEW_NAMES as string[]).includes(name) ? (name as ViewName) : 'home'
+}
+
+const currentView = ref<ViewName>(parseHash())
 
 /** 跨工具流转的图片（如图片编辑 → 其他工具），目标视图消费后清空 */
 const transferImage = ref<File | null>(null)
@@ -41,10 +89,30 @@ function navigate(view: ViewName, file?: File) {
   if (view === 'home') {
     transferImage.value = null
   }
-  currentView.value = view
+  const target = hashOf(view)
+  if (location.hash === target) {
+    currentView.value = view
+    return
+  }
+  // 只改 hash，视图切换统一由 hashchange 驱动，保证返回键与地址栏行为一致
+  location.hash = target
 }
 
+function onHashChange() {
+  currentView.value = parseHash()
+}
+
+watch(
+  currentView,
+  (view) => {
+    document.title = view === 'home' ? TITLES.home : `${TITLES[view]} · 图片工具箱`
+  },
+  { immediate: true },
+)
+
 // ---- 全局拖拽上传：把图片拖到页面任意位置即可导入当前工具 ----
+const isModelDownloading = computed(() => aiModel.stage === 'downloading' || aiModel.stage === 'warming')
+
 const dragDepth = ref(0)
 const isDragging = ref(false)
 
@@ -98,6 +166,9 @@ onMounted(() => {
   window.addEventListener('dragleave', onDragLeave)
   window.addEventListener('drop', onDrop)
   window.addEventListener('paste', onPaste)
+  window.addEventListener('hashchange', onHashChange)
+  // 无 hash 的首次访问归一化为 #/，让首页也有一个可复制分享的稳定地址
+  if (!location.hash) location.replace(`${location.pathname}${location.search}#/`)
 })
 
 onUnmounted(() => {
@@ -106,6 +177,7 @@ onUnmounted(() => {
   window.removeEventListener('dragleave', onDragLeave)
   window.removeEventListener('drop', onDrop)
   window.removeEventListener('paste', onPaste)
+  window.removeEventListener('hashchange', onHashChange)
 })
 </script>
 
@@ -153,6 +225,45 @@ onUnmounted(() => {
 .drop-hint svg {
   width: 48px;
   height: 48px;
+}
+
+/* 全局模型下载指示条：不拦截点击，切到任何工具都持续可见 */
+.model-chip {
+  position: fixed;
+  left: 50%;
+  bottom: calc(18px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 900;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 220px;
+  max-width: calc(100vw - 32px);
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: rgba(28, 30, 38, 0.9);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22);
+}
+.model-chip-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  overflow: hidden;
+}
+.model-chip-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #4f6ef7, #22d3ee);
+  transition: width 0.3s ease;
+}
+.model-chip-text {
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: center;
 }
 </style>
 
@@ -246,6 +357,22 @@ onUnmounted(() => {
         </svg>
         <div>松开鼠标，立即处理图片</div>
       </div>
+    </div>
+
+    <!-- 全局模型下载指示：切到任何工具都持续可见，且不拦截操作 -->
+    <div v-if="isModelDownloading" class="model-chip">
+      <div class="model-chip-track">
+        <div class="model-chip-fill" :style="{ width: aiModel.percent + '%' }"></div>
+      </div>
+      <span class="model-chip-text">
+        {{ aiModel.stage === 'warming' ? '初始化 AI 模型…' : '下载 AI 模型' }}
+        <template v-if="aiModel.totalMB > 0">
+          {{ aiModel.loadedMB.toFixed(1) }} / {{ aiModel.totalMB.toFixed(0) }} MB
+        </template>
+        <span v-if="aiModel.remainingSeconds != null">
+          · 约 {{ formatDuration(aiModel.remainingSeconds * 1000) }}后好
+        </span>
+      </span>
     </div>
   </div>
 </template>

@@ -3,6 +3,16 @@
  * 完全在浏览器本地执行，图片不上传任何服务器
  */
 
+import { detectInferenceDevice } from './device'
+
+/**
+ * 抠图模型档位：isnet_quint8（42.3MB）。
+ * @imgly 默认档 isnet_fp16（84.1MB），体积翻倍但抠图边缘提升有限，
+ * 移动端首次加载会退化成分钟级等待，故显式降到量化版。
+ * 预热与推理必须共用同一档，否则会各下载一份模型。
+ */
+export const BG_MODEL = 'isnet_quint8' as const
+
 export interface RemoveBgProgress {
   percent: number
   stage: string
@@ -20,14 +30,13 @@ export async function removeImageBackground(
 ): Promise<Blob> {
   onProgress?.({ percent: 0, stage: '准备模型…' })
   // 按需动态加载 @imgly/background-removal：onnxruntime / wasm 仅在真正抠图时下载
-  // （首次约 800KB JS + 40MB 模型），首屏不占用体积与启动耗时。
+  // （首次约 800KB JS + 42MB 模型），首屏不占用体积与启动耗时。
   const { removeBackground } = await import('@imgly/background-removal')
 
-  // 能力检测：支持 WebGPU 的桌面浏览器用 GPU 推理可显著提速，否则回退 CPU
-  const canUseGpu = typeof navigator !== 'undefined' && 'gpu' in navigator
-  const device = canUseGpu ? ('gpu' as const) : ('cpu' as const)
+  const device = await detectInferenceDevice()
 
   const blob = await removeBackground(imageSrc, {
+    model: BG_MODEL,
     progress: (key: string, current: number, total: number) => {
       // key 为 'fetch:xxx' / 'compute:inference' / 'compute:decode' 等阶段
       let percent = Math.round((current / Math.max(total, 1)) * 100)

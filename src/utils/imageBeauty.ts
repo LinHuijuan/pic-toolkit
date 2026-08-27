@@ -1,16 +1,19 @@
 /**
  * 本地美颜 / 人像修图（MediaPipe 人脸关键点 + 磨皮提亮）
  * - 完全在本机检测与修图，人脸信息不上传服务器
- * - MediaPipe FaceLandmarker 以 wasm 加载，模型走官方 CDN
+ * - MediaPipe FaceLandmarker 以 wasm 加载，模型随站点同源分发
  */
 
 import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision'
 
-/** wasm 运行时（jsDelivr CDN） */
-const WASM_BASE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm'
-/** 人脸关键点模型（Google 官方托管） */
-const MODEL_URL =
-  'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task'
+/** wasm 运行时版本必须与已安装的 @mediapipe/tasks-vision 一致，否则 JS 胶水与 wasm 不匹配 */
+const TASKS_VISION_VERSION = '1.0.1'
+const WASM_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${TASKS_VISION_VERSION}/wasm`
+/**
+ * 人脸关键点模型随站点同源部署。
+ * 原先直连 storage.googleapis.com，该域名在国内网络不可达会导致美颜整体失败。
+ */
+const MODEL_URL = `${import.meta.env.BASE_URL}models/face_landmarker.task`
 
 type Pt = { x: number; y: number }
 

@@ -6,7 +6,10 @@
  *    即使模型已缓存仍需"准备时间"，预热可让真正使用时零等待）
  */
 
+import { reactive } from 'vue'
 import { fetchSampleFile } from './sampleImage'
+import { detectInferenceDevice } from './device'
+import { BG_MODEL } from './removeBg'
 
 export type AiModelStage = 'idle' | 'downloading' | 'warming' | 'ready' | 'error'
 
@@ -29,38 +32,48 @@ const MB = 1024 * 1024
 let prepared = false
 let preparing: Promise<void> | null = null
 
-/** 探测 WebGPU（与 removeBg.ts 保持一致） */
-function detectDevice(): 'gpu' | 'cpu' {
-  return typeof navigator !== 'undefined' && 'gpu' in navigator ? 'gpu' : 'cpu'
+/** 模型是否已就绪（只读查询，不会触发下载） */
+export function isAiModelReady(): boolean {
+  return prepared
+}
+
+/**
+ * 共享的模型状态：原本进度只能由发起方组件持有，切到别的工具再回来进度就丢了、
+ * 证件照与抠图也会各自重复触发下载。提升到模块级后所有视图绑定同一份状态。
+ */
+export const aiModel = reactive<AiModelProgress>({
+  stage: 'idle',
+  percent: 0,
+  loadedMB: 0,
+  totalMB: 0,
+  elapsedMs: 0,
+  remainingSeconds: null,
+  message: '',
+})
+
+function setProgress(p: Partial<AiModelProgress>) {
+  Object.assign(aiModel, p)
 }
 
 /** 预下载并预热 AI 抠图模型（模块级单例，避免并发重复初始化） */
-export function prepareAiModel(onProgress: (p: AiModelProgress) => void): Promise<void> {
+export function prepareAiModel(): Promise<void> {
   if (prepared) {
-    onProgress({
-      stage: 'ready',
-      percent: 100,
-      loadedMB: 0,
-      totalMB: 0,
-      elapsedMs: 0,
-      remainingSeconds: null,
-      message: '模型已就绪',
-    })
+    setProgress({ stage: 'ready', percent: 100, message: '模型已就绪' })
     return Promise.resolve()
   }
   if (preparing) return preparing
-  preparing = doPrepare(onProgress)
+  preparing = doPrepare()
   return preparing
 }
 
-async function doPrepare(onProgress: (p: AiModelProgress) => void): Promise<void> {
+async function doPrepare(): Promise<void> {
   const start = Date.now()
-  const device = detectDevice()
+  const device = await detectInferenceDevice()
   try {
     const { preload, removeBackground } = await import('@imgly/background-removal')
 
     // 阶段一：预下载模型文件（fetch 进度 key 以 'fetch:' 开头，current/total 为字节）
-    onProgress({
+    setProgress({
       stage: 'downloading',
       percent: 0,
       loadedMB: 0,
@@ -71,6 +84,7 @@ async function doPrepare(onProgress: (p: AiModelProgress) => void): Promise<void
     })
     await preload({
       device,
+      model: BG_MODEL,
       progress: (key: string, current: number, total: number) => {
         if (!key.startsWith('fetch')) return
         const elapsedMs = Date.now() - start
@@ -78,7 +92,7 @@ async function doPrepare(onProgress: (p: AiModelProgress) => void): Promise<void
         const speed = current / seconds
         const remainingSeconds = total > 0 && speed > 0 ? (total - current) / speed : null
         const totalMB = total > 0 ? total / MB : 0
-        onProgress({
+        setProgress({
           stage: 'downloading',
           percent: total > 0 ? Math.min(99, Math.round((current / total) * 100)) : 0,
           loadedMB: current / MB,
@@ -91,7 +105,7 @@ async function doPrepare(onProgress: (p: AiModelProgress) => void): Promise<void
     })
 
     // 阶段二：用示例图后台跑一次推理，预热 onnx 会话
-    onProgress({
+    setProgress({
       stage: 'warming',
       percent: 99,
       loadedMB: 0,
@@ -101,10 +115,10 @@ async function doPrepare(onProgress: (p: AiModelProgress) => void): Promise<void
       message: '初始化模型会话…',
     })
     const file = await fetchSampleFile('scene')
-    await removeBackground(file, { device })
+    await removeBackground(file, { device, model: BG_MODEL })
 
     prepared = true
-    onProgress({
+    setProgress({
       stage: 'ready',
       percent: 100,
       loadedMB: 0,
@@ -115,15 +129,10 @@ async function doPrepare(onProgress: (p: AiModelProgress) => void): Promise<void
     })
   } catch (error) {
     preparing = null
+    setProgress({
+      stage: 'error',
+      message: error instanceof Error ? error.message : '模型下载失败，请检查网络后重试',
+    })
     throw error
   }
-}
-
-/** 将毫秒格式化为可读时长（秒 / 分秒） */
-export function formatDuration(ms: number): string {
-  const s = Math.round(ms / 1000)
-  if (s < 60) return `${s} 秒`
-  const m = Math.floor(s / 60)
-  const r = s % 60
-  return r > 0 ? `${m} 分 ${r} 秒` : `${m} 分`
 }

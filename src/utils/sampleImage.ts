@@ -47,3 +47,38 @@ export async function fetchSampleFiles(kind: SampleKind, count = 2): Promise<Fil
   }
   return files
 }
+
+const smallCache = new Map<string, File>()
+
+/**
+ * 长边压到 edge 的小图示例。
+ * 内置示例图本身是 900×1200 / 1280×800，直接拿来演示超分既不符合"小图放大"的场景，
+ * 也会立刻撞上输入预算被降级，所以演示用图需要先缩小。
+ */
+export async function fetchSmallSampleFile(kind: SampleKind, edge: number): Promise<File> {
+  const key = `${kind}-${edge}`
+  const cached = smallCache.get(key)
+  if (cached) return cached
+
+  const source = await fetchSampleFile(kind)
+  const bitmap = await createImageBitmap(source)
+  const fit = Math.min(1, edge / Math.max(bitmap.width, bitmap.height))
+  const w = Math.max(1, Math.round(bitmap.width * fit))
+  const h = Math.max(1, Math.round(bitmap.height * fit))
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('当前浏览器不支持 Canvas 2D')
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  ctx.drawImage(bitmap, 0, 0, w, h)
+  bitmap.close()
+
+  const blob = await new Promise<Blob>((resolve, reject) =>
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('示例图处理失败'))), 'image/png'),
+  )
+  const file = new File([blob], `示例小图_${w}x${h}.png`, { type: 'image/png' })
+  smallCache.set(key, file)
+  return file
+}
