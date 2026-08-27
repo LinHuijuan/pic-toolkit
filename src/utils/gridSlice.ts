@@ -3,6 +3,9 @@
  * 将图片按 rows × cols 均匀切分为多块，支持块间留白（gap）与透明背景
  */
 
+/** 浏览器 canvas 最大边长（Chrome/Safari 约 16384px，超出无法绘制） */
+const MAX_CANVAS_DIM = 16384
+
 export interface GridSliceOptions {
   rows: number
   cols: number
@@ -43,6 +46,11 @@ export function sliceGrid(bitmap: ImageBitmap, options: GridSliceOptions): Slice
     throw new Error('行列数必须大于 0')
   }
 
+  // 浏览器 canvas 最大尺寸限制（约 16384px），超出会静默失败或白屏
+  if (bitmap.width > MAX_CANVAS_DIM || bitmap.height > MAX_CANVAS_DIM) {
+    throw new Error('图片尺寸过大（超出浏览器画布上限 16384px），请先缩小图片再切图')
+  }
+
   const srcW = bitmap.width
   const srcH = bitmap.height
   const { sliceW, sliceH } = calcSliceSize(srcW, srcH, rows, cols, gap)
@@ -71,6 +79,44 @@ export function sliceGrid(bitmap: ImageBitmap, options: GridSliceOptions): Slice
     }
   }
   return results
+}
+
+/**
+ * 将切块按原布局拼回成一张完整预览图（含块间留白）
+ * 留白处保持透明，便于在棋盘格背景上观察留白与透明背景效果
+ */
+export function buildSlicePreview(
+  slices: SliceResult[],
+  rows: number,
+  cols: number,
+  gap = 0,
+): HTMLCanvasElement {
+  if (slices.length === 0) {
+    throw new Error('没有可预览的切块')
+  }
+  const sliceW = slices[0].canvas.width
+  const sliceH = slices[0].canvas.height
+  const totalW = sliceW * cols + gap * (cols - 1)
+  const totalH = sliceH * rows + gap * (rows - 1)
+
+  // 浏览器 canvas 最大尺寸限制（约 16384px），超出会静默失败或白屏
+  if (totalW > MAX_CANVAS_DIM || totalH > MAX_CANVAS_DIM) {
+    throw new Error('预览尺寸过大（超出浏览器画布上限 16384px），请减少行列数或缩小留白')
+  }
+
+  const canvas = document.createElement('canvas')
+  canvas.width = totalW
+  canvas.height = totalH
+  const ctx = canvas.getContext('2d')
+  if (!ctx) {
+    throw new Error('当前浏览器不支持 Canvas 2D')
+  }
+  slices.forEach((slice, index) => {
+    const r = Math.floor(index / cols)
+    const c = index % cols
+    ctx.drawImage(slice.canvas, c * (sliceW + gap), r * (sliceH + gap))
+  })
+  return canvas
 }
 
 /** 生成切块下载文件名 */

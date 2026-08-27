@@ -1,25 +1,206 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, type CSSProperties } from 'vue'
+import { useImageDrop } from '../composables/useImageDrop'
 import {
   loadImageFromFile,
   downloadCanvas,
   type LoadedImage,
 } from '../utils/imageLoader'
-import { drawWatermark, type WatermarkMode, type WatermarkPosition } from '../utils/watermark'
+import { drawWatermark, drawImageWatermark, type WatermarkMode, type WatermarkPosition } from '../utils/watermark'
+import { showToast } from '../utils/toast'
+import { fetchSampleFile } from '../utils/sampleImage'
 
-const emit = defineEmits<{ back: [] }>()
+const emit = defineEmits<{ back: []; consumed: [] }>()
+
+const props = defineProps<{ incomingFile?: File | null }>()
+
+// 全站拖拽上传：把图片拖到页面任意位置导入当前工具
+useImageDrop((files) => {
+  if (files[0]) processFile(files[0])
+})
 
 const fileInput = ref<HTMLInputElement | null>(null)
+const logoInput = ref<HTMLInputElement | null>(null)
 const source = ref<LoadedImage | null>(null)
 
+const wmType = ref<'text' | 'image'>('text')
 const text = ref('© 图片工具箱')
 const mode = ref<WatermarkMode>('tile')
 const fontSizeRatio = ref(4) // 百分比，4 = 4%
+const logoSizeRatio = ref(20) // 百分比，20 = 20%
 const opacity = ref(40) // 百分比
 const color = ref('#ffffff')
 const position = ref<WatermarkPosition>('bottom-right')
 const angle = ref(-30)
-const hasDarkOption = ref(false)
+const fontFamily = ref('sans-serif')
+
+const FONTS = [
+  { label: '默认', value: 'sans-serif' },
+  { label: '宋体', value: 'serif' },
+  { label: '楷体', value: "'KaiTi', 'STKaiti', serif" },
+  { label: '黑体', value: "'Microsoft YaHei', 'Heiti SC', sans-serif" },
+  { label: '等宽', value: 'monospace' },
+]
+
+/** 空状态渐变 SVG 图标（与首页功能卡片风格一致） */
+/** 文字水印常用模板（一键套用） */
+const WATERMARK_TEMPLATES = ['仅供学习交流', '盗图必究', '© 版权所有', '示例水印']
+
+/** 套用常用模板（text 变化由 watch 自动触发预览重建） */
+function applyTemplate(t: string) {
+  text.value = t
+}
+
+const STROKE = 'viewBox="0 0 24 24" fill="none" stroke="url(#icon-grad)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"'
+const EMPTY_ICON = `<svg ${STROKE}><path d="M12 3.5c3.2 4.2 5.5 7.1 5.5 10a5.5 5.5 0 1 1-11 0c0-2.9 2.3-5.8 5.5-10Z"/><path d="M8.5 14.5h7M9.5 17h5"/></svg>`
+
+/** Logo 图片（水印类型为图片时使用） */
+const logo = ref<LoadedImage | null>(null)
+const logoUrl = ref('')
+
+/** 单点模式下拖拽自定义的文字中心位置（相对图片 0~1 比例），null 表示使用预设位置 */
+const customPosition = ref<{ x: number; y: number } | null>(null)
+const dragging = ref(false)
+/** 图片显示宽度 / 原始宽度，用于拖拽层文字随图片等比缩放 */
+const displayScale = ref(1)
+const stageRef = ref<HTMLDivElement | null>(null)
+/** 与 watermark.ts 中 marginRatio 默认值保持一致 */
+const MARGIN_RATIO = 0.05
+
+/** 快照式撤销/重做：记录每次生成的水印结果，可回退/前进（与编辑页一致） */
+const MAX_HISTORY = 20
+const resultStack = ref<{ canvas: HTMLCanvasElement; url: string }[]>([])
+const resultIndex = ref(-1)
+
+function commitResult(canvas: HTMLCanvasElement) {
+  const url = canvas.toDataURL('image/png')
+  const top = resultStack.value[resultIndex.value]
+  if (top && top.url === url) return
+  // 首次生成前，先压入纯原图作为栈底（便于撤销水印时回到原图）
+  if (resultStack.value.length === 0 && source.value) {
+    const srcCanvas = document.createElement('canvas')
+    srcCanvas.width = source.value.width
+    srcCanvas.height = source.value.height
+    srcCanvas.getContext('2d')?.drawImage(source.value.bitmap, 0, 0)
+    resultStack.value.push({ canvas: srcCanvas, url: srcCanvas.toDataURL('image/png') })
+  }
+  resultStack.value = resultStack.value.slice(0, resultIndex.value + 1)
+  resultStack.value.push({ canvas, url })
+  if (resultStack.value.length > MAX_HISTORY) resultStack.value.shift()
+  resultIndex.value = resultStack.value.length - 1
+  resultCanvas.value = canvas
+  resultUrl.value = url
+}
+
+function undo() {
+  if (resultIndex.value <= 0) return
+  resultIndex.value--
+  const item = resultStack.value[resultIndex.value]
+  resultCanvas.value = item.canvas
+  resultUrl.value = item.url
+}
+
+function redo() {
+  if (resultIndex.value >= resultStack.value.length - 1) return
+  resultIndex.value++
+  const item = resultStack.value[resultIndex.value]
+  resultCanvas.value = item.canvas
+  resultUrl.value = item.url
+}
+
+let resizeObserver: ResizeObserver | null = null
+
+/** 单点预设位置 → 文字中心比例（边距基于短边，与绘制逻辑一致） */
+function positionToRatio(pos: WatermarkPosition, imgW: number, imgH: number): { x: number; y: number } {
+  const margin = Math.round(Math.min(imgW, imgH) * MARGIN_RATIO)
+  const mx = margin / imgW
+  const my = margin / imgH
+  switch (pos) {
+    case 'center':
+      return { x: 0.5, y: 0.5 }
+    case 'top-left':
+      return { x: mx, y: my }
+    case 'top-right':
+      return { x: 1 - mx, y: my }
+    case 'bottom-left':
+      return { x: mx, y: 1 - my }
+    case 'bottom-right':
+    default:
+      return { x: 1 - mx, y: 1 - my }
+  }
+}
+
+/** 拖拽层样式：位置与字号按图片原始像素计算，整体随图片显示比例缩放 */
+const wmStyle = computed<CSSProperties>(() => {
+  const src = source.value
+  if (!src) return {}
+  const pos = customPosition.value ?? positionToRatio(position.value, src.width, src.height)
+  const base = {
+    left: `${(pos.x * src.width).toFixed(1)}px`,
+    top: `${(pos.y * src.height).toFixed(1)}px`,
+    opacity: opacity.value / 100,
+    transform: `translate(-50%, -50%) scale(${displayScale.value})`,
+  }
+  if (wmType.value === 'image') {
+    if (!logo.value) return {}
+    const logoW = Math.max(8, Math.round(src.width * (logoSizeRatio.value / 100)))
+    return {
+      ...base,
+      width: `${logoW}px`,
+    }
+  }
+  const shortSide = Math.min(src.width, src.height)
+  const fontSize = Math.max(12, Math.round(shortSide * (fontSizeRatio.value / 100)))
+  return {
+    ...base,
+    fontSize: `${fontSize}px`,
+    color: color.value,
+    fontFamily: fontFamily.value,
+  }
+})
+
+/** 测量图片显示缩放比（显示宽度 / 原始宽度） */
+function measureScale() {
+  const stage = stageRef.value
+  if (!stage || !source.value) return
+  const w = stage.clientWidth
+  if (w > 0) {
+    displayScale.value = w / source.value.width
+  }
+}
+
+function startDrag(event: PointerEvent) {
+  if (mode.value !== 'single' || !source.value) return
+  event.preventDefault()
+  dragging.value = true
+  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+}
+
+function onDragMove(event: PointerEvent) {
+  if (!dragging.value || !source.value) return
+  const stage = stageRef.value
+  if (!stage) return
+  const rect = stage.getBoundingClientRect()
+  if (rect.width <= 0 || rect.height <= 0) return
+  customPosition.value = {
+    x: Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
+    y: Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)),
+  }
+}
+
+function endDrag() {
+  if (!dragging.value) return
+  dragging.value = false
+  // 松手后按最终位置重新生成水印
+  applyWatermark()
+}
+
+/** 选择预设位置（清除拖拽自定义位置） */
+function selectPosition(pos: WatermarkPosition) {
+  if (position.value === pos) return
+  position.value = pos
+  customPosition.value = null
+}
 
 const COLORS = [
   { label: '白色', value: '#ffffff' },
@@ -40,48 +221,127 @@ async function handleFileChange(event: Event) {
   const file = input.files?.[0]
   if (!file) return
   try {
-    source.value = await loadImageFromFile(file)
-    // 根据图片亮度自动推荐水印颜色
-    hasDarkOption.value = isImageBright(file)
-    if (hasDarkOption.value) {
-      color.value = '#ffffff'
-    }
-    applyWatermark()
+    await processFile(file)
   } catch (error) {
-    alert(error instanceof Error ? error.message : '图片加载失败')
+    showToast(error instanceof Error ? error.message : '图片加载失败', 'error')
   } finally {
     input.value = ''
   }
 }
 
-/** 粗略判断图片整体亮度，决定默认水印颜色 */
-function isImageBright(_file: File): boolean {
-  // 简化处理：加载首帧像素均值成本较高，直接返回 false 使用默认白色
-  return false
+/** 加载图片并生成水印预览 */
+async function processFile(file: File) {
+  source.value = await loadImageFromFile(file)
+  // 根据图片亮度自动推荐水印颜色：亮图用深色，暗图用白色
+  color.value = (await isImageBright(source.value.bitmap)) ? '#000000' : '#ffffff'
+  applyWatermark()
+}
+
+/** 一键载入内置示例图体验完整流程 */
+async function loadSample() {
+  try {
+    const file = await fetchSampleFile('scene')
+    await processFile(file)
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : '示例图加载失败', 'error')
+  }
+}
+
+// 接收其他工具流转过来的图片（如图片编辑 → 水印）
+onMounted(() => {
+  if (props.incomingFile) {
+    processFile(props.incomingFile).catch((error) => {
+      showToast(error instanceof Error ? error.message : '图片加载失败', 'error')
+    })
+    emit('consumed')
+  }
+})
+
+/** 选择 Logo 图片（水印类型为图片时使用） */
+async function handleLogoChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  try {
+    logo.value = await loadImageFromFile(file)
+    if (logoUrl.value) {
+      URL.revokeObjectURL(logoUrl.value)
+    }
+    logoUrl.value = URL.createObjectURL(file)
+    applyWatermark()
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : 'Logo 加载失败', 'error')
+  } finally {
+    input.value = ''
+  }
+}
+
+/** 采样图片像素亮度，判断是否为亮图（平均亮度 > 150 视为亮，推荐深色水印） */
+async function isImageBright(bitmap: ImageBitmap): Promise<boolean> {
+  const canvas = document.createElement('canvas')
+  // 缩小到 32px 边长采样，控制性能开销
+  const scale = Math.min(1, 32 / Math.max(bitmap.width, bitmap.height))
+  canvas.width = Math.max(1, Math.round(bitmap.width * scale))
+  canvas.height = Math.max(1, Math.round(bitmap.height * scale))
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return false
+  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+  let sum = 0
+  let count = 0
+  for (let i = 0; i < data.length; i += 4) {
+    sum += data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114
+    count++
+  }
+  return count > 0 && sum / count > 150
 }
 
 function applyWatermark() {
   if (!source.value) return
   try {
-    const canvas = drawWatermark(source.value.bitmap, {
-      text: text.value,
-      fontSizeRatio: fontSizeRatio.value / 100,
-      color: color.value,
-      opacity: opacity.value / 100,
-      mode: mode.value,
-      position: position.value,
-      angle: angle.value,
-    })
-    resultCanvas.value = canvas
-    resultUrl.value = canvas.toDataURL('image/png')
+    // 单点模式：用拖拽自定义位置（无则用预设位置换算的比例）
+    const ratio =
+      mode.value === 'single'
+        ? (customPosition.value ?? positionToRatio(position.value, source.value.width, source.value.height))
+        : undefined
+    let canvas
+    if (wmType.value === 'image') {
+      if (!logo.value) {
+        showToast('请先选择 Logo 图片', 'error')
+        return
+      }
+      canvas = drawImageWatermark(source.value.bitmap, logo.value.bitmap, {
+        opacity: opacity.value / 100,
+        mode: mode.value,
+        position: position.value,
+        sizeRatio: logoSizeRatio.value / 100,
+        xRatio: ratio?.x,
+        yRatio: ratio?.y,
+      })
+    } else {
+      canvas = drawWatermark(source.value.bitmap, {
+        text: text.value,
+        fontSizeRatio: fontSizeRatio.value / 100,
+        color: color.value,
+        opacity: opacity.value / 100,
+        mode: mode.value,
+        position: position.value,
+        angle: angle.value,
+        fontFamily: fontFamily.value,
+        xRatio: ratio?.x,
+        yRatio: ratio?.y,
+      })
+    }
+    commitResult(canvas)
   } catch (error) {
-    alert(error instanceof Error ? error.message : '水印生成失败')
+    showToast(error instanceof Error ? error.message : '水印生成失败', 'error')
   }
 }
 
 function saveResult() {
   if (!source.value || !resultCanvas.value) return
   downloadCanvas(resultCanvas.value, `${source.value.name}_水印.png`)
+  showToast('已开始下载', 'success')
 }
 
 function handleReplace() {
@@ -89,6 +349,12 @@ function handleReplace() {
   // 用带水印的结果替换当前源图，继续叠加
   const canvas = resultCanvas.value
   createImageBitmap(canvas).then((newBitmap) => {
+    // 新位图创建成功后关闭旧 bitmap，避免内存泄漏
+    try {
+      source.value?.bitmap.close()
+    } catch {
+      /* bitmap 已关闭，忽略 */
+    }
     source.value = {
       bitmap: newBitmap,
       width: canvas.width,
@@ -100,7 +366,50 @@ function handleReplace() {
 }
 
 // 参数变化时自动重新生成
-watch([text, mode, fontSizeRatio, opacity, color, position, angle], applyWatermark)
+watch(
+  [text, mode, wmType, fontSizeRatio, logoSizeRatio, opacity, color, position, angle, fontFamily],
+  applyWatermark,
+)
+
+// Logo 变化时重新生成
+watch(logo, applyWatermark)
+
+// 切换样式时重置拖拽状态（避免拖拽中切换模式残留）
+watch(mode, () => {
+  dragging.value = false
+})
+
+// 源图变化后测量显示缩放比，并监听拖拽层尺寸变化（窗口缩放 / 容器变化时更新）
+watch(
+  source,
+  () => {
+    resizeObserver?.disconnect()
+    const stage = stageRef.value
+    if (!stage) return
+    resizeObserver = new ResizeObserver(measureScale)
+    resizeObserver.observe(stage)
+    measureScale()
+  },
+  { flush: 'post' },
+)
+
+// 组件卸载时释放源图 / Logo 的 bitmap、预览 URL 与观察器
+onUnmounted(() => {
+  resizeObserver?.disconnect()
+  try {
+    source.value?.bitmap.close()
+  } catch {
+    /* bitmap 已关闭，忽略 */
+  }
+  try {
+    logo.value?.bitmap.close()
+  } catch {
+    /* bitmap 已关闭，忽略 */
+  }
+  if (logoUrl.value) {
+    URL.revokeObjectURL(logoUrl.value)
+  }
+})
 </script>
 
 <template>
@@ -114,9 +423,12 @@ watch([text, mode, fontSizeRatio, opacity, color, position, angle], applyWaterma
     <div class="page-content">
       <!-- 未选图状态 -->
       <div v-if="!source" class="empty-state">
-        <div class="empty-icon">💧</div>
+        <div class="empty-icon" v-html="EMPTY_ICON"></div>
         <div>选择一张图片添加水印</div>
-        <button class="btn btn-primary" style="width: 180px" @click="pickImage">选择图片</button>
+        <div class="empty-actions">
+                  <button class="btn btn-primary" style="width: 180px" @click="pickImage">选择图片</button>
+                  <button class="btn btn-sample" @click="loadSample">体验示例图</button>
+                </div>
       </div>
 
       <template v-else>
@@ -124,7 +436,29 @@ watch([text, mode, fontSizeRatio, opacity, color, position, angle], applyWaterma
         <div class="card">
           <div class="card-title">预览</div>
           <div class="preview-wrap">
-            <img :src="resultUrl" alt="水印预览" />
+            <div ref="stageRef" class="wm-stage">
+              <img :src="resultUrl" alt="水印预览" />
+              <img
+                v-if="mode === 'single' && wmType === 'image' && logoUrl"
+                :src="logoUrl"
+                alt="Logo 水印"
+                class="wm-text"
+                :style="wmStyle"
+                @pointerdown="startDrag"
+                @pointermove="onDragMove"
+                @pointerup="endDrag"
+                @pointercancel="endDrag"
+              />
+              <div
+                v-else-if="mode === 'single'"
+                class="wm-text"
+                :style="wmStyle"
+                @pointerdown="startDrag"
+                @pointermove="onDragMove"
+                @pointerup="endDrag"
+                @pointercancel="endDrag"
+              >{{ text }}</div>
+            </div>
           </div>
         </div>
 
@@ -133,9 +467,38 @@ watch([text, mode, fontSizeRatio, opacity, color, position, angle], applyWaterma
           <div class="card-title">水印设置</div>
 
           <div class="form-row">
+            <span class="label">水印类型</span>
+            <div class="seg-control" style="flex: 1">
+              <div class="seg-item" :class="{ active: wmType === 'text' }" @click="wmType = 'text'">
+                文字
+              </div>
+              <div class="seg-item" :class="{ active: wmType === 'image' }" @click="wmType = 'image'">
+                图片
+              </div>
+            </div>
+          </div>
+
+          <div v-if="wmType === 'text'" class="form-row">
             <span class="label">水印文字</span>
             <input v-model="text" type="text" maxlength="30" placeholder="请输入水印文字" />
           </div>
+
+          <div v-if="wmType === 'text'" class="form-row">
+            <span class="label">模板</span>
+            <div class="tmpl-chips">
+              <span v-for="t in WATERMARK_TEMPLATES" :key="t" class="tmpl-chip" @click="applyTemplate(t)">{{ t }}</span>
+            </div>
+          </div>
+
+          <div v-else class="form-row">
+            <span class="label">Logo 图片</span>
+            <button class="btn btn-outline" style="flex: 1; padding: 8px" @click="logoInput?.click()">
+              {{ logo ? '更换 Logo' : '选择 Logo' }}
+            </button>
+          </div>
+          <p v-if="wmType === 'image'" class="tip-text" style="margin-top: 2px">
+            建议使用透明背景 PNG，小尺寸 Logo 效果更佳。
+          </p>
 
           <div class="form-row">
             <span class="label">样式</span>
@@ -149,7 +512,7 @@ watch([text, mode, fontSizeRatio, opacity, color, position, angle], applyWaterma
             </div>
           </div>
 
-          <div v-if="mode === 'tile'" class="range-row">
+          <div v-if="mode === 'tile' && wmType === 'text'" class="range-row">
             <span class="label">旋转角度</span>
             <input v-model.number="angle" type="range" min="-90" max="90" step="5" />
             <span class="range-val">{{ angle }}°</span>
@@ -163,17 +526,33 @@ watch([text, mode, fontSizeRatio, opacity, color, position, angle], applyWaterma
                 :key="pos"
                 class="pos-chip"
                 :class="{ active: position === pos }"
-                @click="position = pos"
+                @click="selectPosition(pos)"
               >
                 {{ ({ center: '居中', 'top-left': '左上', 'top-right': '右上', 'bottom-left': '左下', 'bottom-right': '右下' } as Record<string, string>)[pos] }}
               </div>
             </div>
           </div>
+          <p v-if="mode === 'single'" class="tip-text" style="margin-top: 2px">
+            也可以直接在预览图中拖动文字调整位置。
+          </p>
 
-          <div class="range-row">
+          <div v-if="wmType === 'image'" class="range-row">
+            <span class="label">Logo 尺寸</span>
+            <input v-model.number="logoSizeRatio" type="range" min="5" max="50" />
+            <span class="range-val">{{ logoSizeRatio }}%</span>
+          </div>
+
+          <div v-else class="range-row">
             <span class="label">字号</span>
             <input v-model.number="fontSizeRatio" type="range" min="1" max="15" />
             <span class="range-val">{{ fontSizeRatio }}%</span>
+          </div>
+
+          <div v-if="wmType === 'text'" class="form-row">
+            <span class="label">字体</span>
+            <select v-model="fontFamily" class="select-input" style="flex: 1">
+              <option v-for="f in FONTS" :key="f.value" :value="f.value">{{ f.label }}</option>
+            </select>
           </div>
 
           <div class="range-row">
@@ -182,7 +561,7 @@ watch([text, mode, fontSizeRatio, opacity, color, position, angle], applyWaterma
             <span class="range-val">{{ opacity }}%</span>
           </div>
 
-          <div class="form-row">
+          <div v-if="wmType === 'text'" class="form-row">
             <span class="label">颜色</span>
             <div class="color-dots">
               <div
@@ -206,6 +585,8 @@ watch([text, mode, fontSizeRatio, opacity, color, position, angle], applyWaterma
     <!-- 底部操作栏 -->
     <div v-if="source" class="bottom-bar">
       <button class="btn btn-ghost" @click="pickImage">重新选图</button>
+      <button class="btn btn-ghost" :disabled="resultIndex <= 0" @click="undo">撤销</button>
+      <button class="btn btn-ghost" :disabled="resultIndex >= resultStack.length - 1" @click="redo">重做</button>
       <button class="btn btn-outline" @click="handleReplace">继续叠加</button>
       <button class="btn btn-primary" @click="saveResult">保存图片</button>
     </div>
@@ -218,24 +599,136 @@ watch([text, mode, fontSizeRatio, opacity, color, position, angle], applyWaterma
       style="display: none"
       @change="handleFileChange"
     />
+    <input
+      ref="logoInput"
+      type="file"
+      accept="image/*"
+      style="display: none"
+      @change="handleLogoChange"
+    />
+    <!-- 渐变图标定义（供空状态图标引用） -->
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <defs>
+        <linearGradient id="icon-grad" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stop-color="#f472b6" />
+          <stop offset="100%" stop-color="#db2777" />
+        </linearGradient>
+      </defs>
+    </svg>
   </div>
 </template>
 
 <style scoped>
-.pos-chip {
-  padding: 6px 12px;
+.app-shell {
+  isolation: isolate;
+  --primary: #f472b6;
+  --gradient: linear-gradient(135deg, #f472b6, #db2777);
+  --gradient-soft: linear-gradient(135deg, color-mix(in srgb, #f472b6 12%, transparent), color-mix(in srgb, #db2777 14%, transparent));
+  --primary-light: color-mix(in srgb, #f472b6 8%, #fff);
+}
+
+/* 背景氛围光斑：柔和多色 radial 光晕（全站统一） */
+.app-shell::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(520px circle at 12% 6%, rgba(34, 211, 238, 0.2), transparent 55%),
+    radial-gradient(480px circle at 88% 10%, rgba(250, 204, 21, 0.16), transparent 55%),
+    radial-gradient(640px circle at 42% 88%, rgba(168, 85, 247, 0.18), transparent 60%),
+    radial-gradient(430px circle at 96% 62%, rgba(16, 185, 129, 0.14), transparent 55%),
+    radial-gradient(360px circle at 70% 30%, rgba(244, 114, 182, 0.1), transparent 55%);
+}
+/* 常用水印模板 */
+.tmpl-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  flex: 1;
+}
+.tmpl-chip {
+  padding: 4px 10px;
   border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #fff;
+  font-size: 12px;
+  color: var(--text-sub);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.tmpl-chip:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--gradient-soft);
+}
+
+.pos-chip {
+  padding: 7px 12px;
+  border-radius: 10px;
   border: 1.5px solid var(--border);
   background: #fff;
   font-size: 13px;
   color: var(--text-sub);
   cursor: pointer;
+  transition: all 0.15s;
 }
 
 .pos-chip.active {
-  border-color: var(--primary);
-  background: var(--primary-light);
+  border-color: transparent;
+  background: var(--gradient-soft);
   color: var(--primary);
   font-weight: 600;
+  box-shadow: 0 2px 6px rgba(79, 110, 247, 0.12);
+}
+
+/* 水印拖拽层：与预览图片同尺寸包裹，文字绝对定位并随图片缩放 */
+.wm-stage {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+}
+
+/* PC 宽屏：预览左栏 + 设置右栏双栏布局 */
+@media (min-width: 768px) {
+  .page-content {
+    display: grid;
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+    gap: 20px;
+    align-items: start;
+  }
+
+  .page-content .card:nth-child(1) {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .page-content .card:nth-child(2) {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .page-content .tip-text {
+    grid-column: 1 / -1;
+  }
+}
+
+.wm-stage img {
+  display: block;
+}
+
+.wm-text {
+  position: absolute;
+  left: 0;
+  top: 0;
+  white-space: nowrap;
+  touch-action: none;
+  cursor: move;
+  user-select: none;
+  -webkit-user-select: none;
+  font-family: sans-serif;
+  line-height: 1;
 }
 </style>

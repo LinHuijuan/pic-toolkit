@@ -3,8 +3,6 @@
  * 完全在浏览器本地执行，图片不上传任何服务器
  */
 
-import { removeBackground } from '@imgly/background-removal'
-
 export interface RemoveBgProgress {
   percent: number
   stage: string
@@ -21,6 +19,13 @@ export async function removeImageBackground(
   onProgress?: (progress: RemoveBgProgress) => void,
 ): Promise<Blob> {
   onProgress?.({ percent: 0, stage: '准备模型…' })
+  // 按需动态加载 @imgly/background-removal：onnxruntime / wasm 仅在真正抠图时下载
+  // （首次约 800KB JS + 40MB 模型），首屏不占用体积与启动耗时。
+  const { removeBackground } = await import('@imgly/background-removal')
+
+  // 能力检测：支持 WebGPU 的桌面浏览器用 GPU 推理可显著提速，否则回退 CPU
+  const canUseGpu = typeof navigator !== 'undefined' && 'gpu' in navigator
+  const device = canUseGpu ? ('gpu' as const) : ('cpu' as const)
 
   const blob = await removeBackground(imageSrc, {
     progress: (key: string, current: number, total: number) => {
@@ -43,7 +48,7 @@ export async function removeImageBackground(
       format: 'image/png',
       quality: 1,
     },
-    device: 'cpu',
+    device,
   })
 
   onProgress?.({ percent: 100, stage: '完成' })
@@ -70,6 +75,42 @@ export function composeBackground(blob: Blob, bgColor: string | null): Promise<H
         ctx.fillRect(0, 0, canvas.width, canvas.height)
       }
       ctx.drawImage(img, 0, 0)
+      URL.revokeObjectURL(url)
+      resolve(canvas)
+    }
+    img.onerror = () => {
+      URL.revokeObjectURL(url)
+      reject(new Error('抠图结果解析失败'))
+    }
+    img.src = url
+  })
+}
+
+/** 将抠图结果（PNG Blob）融合到指定背景图上，输出尺寸与背景图一致（cover 铺满） */
+export function composeBackgroundImage(
+  blob: Blob,
+  bg: HTMLImageElement | HTMLCanvasElement,
+): Promise<HTMLCanvasElement> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob)
+    const img = new Image()
+    img.onload = () => {
+      const bw = bg instanceof HTMLImageElement ? bg.naturalWidth : bg.width
+      const bh = bg instanceof HTMLImageElement ? bg.naturalHeight : bg.height
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.max(1, bw)
+      canvas.height = Math.max(1, bh)
+      const ctx = canvas.getContext('2d')
+      if (!ctx) {
+        URL.revokeObjectURL(url)
+        reject(new Error('当前浏览器不支持 Canvas 2D'))
+        return
+      }
+      ctx.drawImage(bg as HTMLImageElement, 0, 0, canvas.width, canvas.height)
+      const scale = Math.max(canvas.width / img.width, canvas.height / img.height)
+      const dw = img.width * scale
+      const dh = img.height * scale
+      ctx.drawImage(img, (canvas.width - dw) / 2, (canvas.height - dh) / 2, dw, dh)
       URL.revokeObjectURL(url)
       resolve(canvas)
     }
