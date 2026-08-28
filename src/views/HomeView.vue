@@ -51,21 +51,21 @@ const features: ToolCard[] = [
   {
     key: 'grid' as const,
     title: '九宫格切图',
-    desc: '朋友圈发图神器，一键切分多格，可保存完整图，支持留白与透明背景',
+    desc: '朋友圈发图神器，一键切分多格，支持留白与透明背景，多张一次打包 ZIP',
     grad: ['#ff8a5c', '#f4593a'] as const,
     iconBody: '<rect x="3.5" y="3.5" width="17" height="17" rx="2.5"/><path d="M3.5 9.5h17M3.5 15.5h17M9.5 3.5v17M15.5 3.5v17"/>',
   },
   {
     key: 'watermark' as const,
     title: '添加水印',
-    desc: '文字 / 图片水印，支持平铺、单点放置，保护你的原创图片',
+    desc: '文字 / 图片水印，可平铺或单点放置，一套参数批量套用几十张',
     grad: ['#f472b6', '#db2777'] as const,
     iconBody: '<path d="M12 3.5c3.2 4.2 5.5 7.1 5.5 10a5.5 5.5 0 1 1-11 0c0-2.9 2.3-5.8 5.5-10Z"/><path d="M8.5 14.5h7M9.5 17h5"/>',
   },
   {
     key: 'removeBg' as const,
     title: 'AI 抠图',
-    desc: '一键去除背景，输出透明 PNG，可换背景色',
+    desc: '一键去除背景并收边去白边，换底色 / 加描边做贴纸，还能手动擦残留',
     badge: '首次需下载 42MB',
     grad: ['#34d399', '#22c55e'] as const,
     iconBody: '<circle cx="6.5" cy="6.5" r="2.8"/><circle cx="6.5" cy="17.5" r="2.8"/><path d="M8.8 8.2 20.5 20M8.8 15.8 20.5 4"/>',
@@ -73,7 +73,7 @@ const features: ToolCard[] = [
   {
     key: 'compress' as const,
     title: '图片压缩',
-    desc: '本地压缩图片体积，支持按质量或目标体积压缩，可批量处理',
+    desc: '按质量或目标体积压到最小，支持 WebP 输出与批量打包',
     grad: ['#38bdf8', '#2563eb'] as const,
     iconBody: '<path d="M14 2.5H7a2 2 0 0 0-2 2v15a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7.5l-5-5Z"/><path d="M14 2.5v5h5"/><path d="m9 15.5 3-3 3 3M12 12.5v6"/>',
   },
@@ -95,7 +95,7 @@ const features: ToolCard[] = [
   {
     key: 'format' as const,
     title: '图片格式转换',
-    desc: 'PNG / JPG / WebP 互转，透明自动白底',
+    desc: 'PNG / JPG / WebP 互转，透明自动白底，iPhone 的 HEIC 也能直接读',
     grad: ['#2dd4bf', '#14b8a6'] as const,
     iconBody: '<path d="M20.5 12a8.5 8.5 0 0 1-14.8 5.7M3.5 12a8.5 8.5 0 0 1 14.8-5.7"/><path d="M20.5 3.5v5h-5M3.5 20.5v-5h5"/>',
   },
