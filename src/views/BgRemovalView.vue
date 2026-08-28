@@ -821,7 +821,7 @@ onUnmounted(() => {
   height: 40px;
   border-radius: 8px;
   overflow: hidden;
-  border: 1px solid var(--border-color, #e5e7eb);
+  border: 1px solid var(--border);
   flex-shrink: 0;
 }
 .bg-thumb img {

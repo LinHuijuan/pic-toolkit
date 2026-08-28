@@ -629,7 +629,7 @@ onUnmounted(() => {
 .color-hex {
   min-width: 68px;
   font-size: 12px;
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-sub);
   font-variant-numeric: tabular-nums;
 }
 
@@ -642,7 +642,7 @@ onUnmounted(() => {
 .range-value {
   min-width: 44px;
   font-size: 12px;
-  color: var(--text-secondary, #6b7280);
+  color: var(--text-sub);
   text-align: right;
   font-variant-numeric: tabular-nums;
 }

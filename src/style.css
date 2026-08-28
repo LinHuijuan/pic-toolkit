@@ -8,6 +8,8 @@
   --danger: #ef4444;
   --text-main: #1f2937;
   --text-sub: #6b7280;
+  /* 三级灰：比 --text-sub 更弱一档，用于"已用时长"这类补充信息 */
+  --text-tertiary: #9ca3af;
   --bg-page: #f4f6fc;
   --bg-card: #ffffff;
   --border: #e8ebf3;
@@ -162,15 +164,18 @@ body {
   pointer-events: none;
 }
 
-.card:hover::before {
-  opacity: 1;
-}
+/* hover 反馈只对真正的指针设备生效：触屏既没有 hover，还会把最后一次点击的状态粘在卡片上 */
+@media (hover: hover) {
+  .card:hover::before {
+    opacity: 1;
+  }
 
-.card:hover {
-  transform: translateY(-4px);
-  box-shadow:
-    0 12px 26px color-mix(in srgb, var(--primary) 22%, transparent),
-    0 3px 8px rgba(31, 41, 55, 0.05);
+  .card:hover {
+    transform: translateY(-4px);
+    box-shadow:
+      0 12px 26px color-mix(in srgb, var(--primary) 22%, transparent),
+      0 3px 8px rgba(31, 41, 55, 0.05);
+  }
 }
 
 .card-title {
@@ -430,6 +435,14 @@ input[type='range']::-moz-range-track {
   transform: scale(1.08);
 }
 
+/* 全局关掉了 tap 高亮，触屏必须自带按压反馈，否则按下像没反应 */
+@media (hover: none) {
+  .seg-control .seg-item:active,
+  .color-dot:active {
+    transform: scale(0.96);
+  }
+}
+
 /* 空状态（未选图） */
 .empty-state {
   display: flex;
@@ -482,10 +495,12 @@ input[type='range']::-moz-range-track {
   transition: all 0.2s;
 }
 
-.btn-sample:hover {
-  background: color-mix(in srgb, var(--primary) 12%, transparent);
-  border-color: color-mix(in srgb, var(--primary) 70%, transparent);
-  transform: translateY(-1px);
+@media (hover: hover) {
+  .btn-sample:hover {
+    background: color-mix(in srgb, var(--primary) 12%, transparent);
+    border-color: color-mix(in srgb, var(--primary) 70%, transparent);
+    transform: translateY(-1px);
+  }
 }
 
 /* 进度条 */
@@ -587,8 +602,9 @@ input[type='range']::-moz-range-track {
 /* ===== PC 宽屏适配（≥768px）：放宽限宽、双栏布局、加大控件 ===== */
 @media (min-width: 768px) {
   .app-shell {
-    /* 占满全屏宽：PC 宽屏不再居中限宽，顶栏与内容区随视口铺满 */
-    max-width: none;
+    /* 各工具页的双栏网格是按这个宽度调的：拉满屏宽会让预览列与参数列同时失衡 */
+    max-width: 1200px;
+    margin-inline: auto;
   }
 
   .page-content {
@@ -631,6 +647,12 @@ input[type='range']::-moz-range-track {
     font-size: 15px;
   }
 
+  .form-row input[type='text'],
+  .form-row input[type='number'],
+  .form-row select {
+    max-width: 240px;
+  }
+
   /* 空状态在双栏 grid 中跨列居中 */
   .page-content > .empty-state {
     grid-column: 1 / -1;
@@ -658,5 +680,30 @@ input[type='range']::-moz-range-track {
   * {
     scrollbar-width: thin;
     scrollbar-color: rgba(79, 110, 247, 0.25) transparent;
+  }
+}
+
+/* ===== 尊重系统的"减少动态效果"：全站兜底 ===== */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* 位移型反馈在晕动症下最难受，直接取消；显隐类保留可读性 */
+  .card:hover,
+  .btn:active,
+  .top-bar .back-btn:active {
+    transform: none !important;
+  }
+
+  /* 常驻的装饰性无限动画会一直占用合成层，低端设备上就是持续耗电 */
+  .home-header::before,
+  .home-header::after {
+    animation: none !important;
   }
 }
