@@ -2,7 +2,7 @@
  * 图片格式转换工具
  * - PNG / JPEG / WebP 互转
  * - 透明图片转 JPEG 时自动填充白色背景
- * - 可选把源 JPEG 的 Exif / ICC 搬到输出，避免一次转换就把拍摄信息丢掉
+ * - 可选把源 JPEG 的拍摄信息搬到输出，避免一次转换就把 EXIF 丢掉
  */
 
 import { canvasToBlob, isCanvasTranslucent } from './imageLoader'

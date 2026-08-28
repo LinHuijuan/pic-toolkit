@@ -20,7 +20,7 @@ useImageDrop((files) => {
 const fileInput = ref<HTMLInputElement | null>(null)
 const items = ref<ConvertItem[]>([])
 const targetFormat = ref<OutputFormat>('jpeg')
-/** 保留源 JPEG 的 Exif/ICC：默认关，EXIF 可能含 GPS，导出前由用户显式选择 */
+/** 保留源 JPEG 的拍摄信息：默认关，EXIF 可能含 GPS，导出前由用户显式选择 */
 const keepMeta = ref(false)
 const processing = ref(false)
 const doneCount = ref(0)

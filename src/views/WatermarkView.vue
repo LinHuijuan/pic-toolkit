@@ -371,7 +371,7 @@ const batchInput = ref<HTMLInputElement | null>(null)
 const batchItems = ref<BatchItem[]>([])
 const batchProcessing = ref(false)
 const batchProgress = ref({ done: 0, total: 0 })
-/** 保留源 JPEG 的 Exif/ICC：默认关，EXIF 可能含 GPS，由用户显式开启 */
+/** 保留源 JPEG 的拍摄信息：默认关，EXIF 可能含 GPS，由用户显式开启 */
 const keepMeta = ref(false)
 
 function clearBatch() {

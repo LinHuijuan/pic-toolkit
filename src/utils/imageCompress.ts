@@ -21,7 +21,7 @@ export interface CompressOptions {
   maxDimension?: number
   /** 输出格式，默认 auto */
   format?: CompressFormat
-  /** 传入源图 Blob 则把它的 Exif / ICC 搬进 JPEG 输出（可能含 GPS，由调用方决定是否开启） */
+  /** 传入源图 Blob 则把它的 Exif（及输出没有色彩描述时的 ICC）搬进 JPEG（可能含 GPS，由调用方决定） */
   metadataFrom?: Blob
 }
 

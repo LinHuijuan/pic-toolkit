@@ -117,7 +117,7 @@ function scanOutputHead(bytes: Uint8Array): { at: number; hasIcc: boolean } {
 }
 
 /**
- * 把源图的 Exif / ICC 注入输出 JPEG。
+ * 把源图的 Exif 注入输出 JPEG，输出自己没有色彩描述时再补上源图的 ICC。
  * 只在「输出确实是 JPEG」且「源也是 JPEG」时生效，其余情况原样返回。
  */
 export async function withJpegMetadata(output: Blob, source: Blob | null | undefined): Promise<Blob> {
