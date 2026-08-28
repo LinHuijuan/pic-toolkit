@@ -4,8 +4,13 @@ import { useImageDrop } from '../composables/useImageDrop'
 import {
   loadImageFromFile,
   downloadCanvas,
+  canvasToBlob,
+  canvasToFile,
   type LoadedImage,
 } from '../utils/imageLoader'
+import { saveMany } from '../utils/zip'
+import { withJpegMetadata } from '../utils/exif'
+import ShareButton from '../components/ShareButton.vue'
 import { drawWatermark, drawImageWatermark, type WatermarkMode, type WatermarkPosition } from '../utils/watermark'
 import { showToast } from '../utils/toast'
 import { fetchSampleFile } from '../utils/sampleImage'
@@ -14,8 +19,12 @@ const emit = defineEmits<{ back: []; consumed: [] }>()
 
 const props = defineProps<{ incomingFile?: File | null }>()
 
-// 全站拖拽上传：把图片拖到页面任意位置导入当前工具
+// 全站拖拽上传：拖一张进编辑器，拖多张直接批量套用当前参数
 useImageDrop((files) => {
+  if (files.length > 1) {
+    runBatch(files)
+    return
+  }
   if (files[0]) processFile(files[0])
 })
 
@@ -296,46 +305,50 @@ async function isImageBright(bitmap: ImageBitmap): Promise<boolean> {
   return count > 0 && sum / count > 150
 }
 
+/** 用当前参数渲染一张水印图（单图预览与批量套用共用同一套参数） */
+function renderWatermark(bitmap: ImageBitmap, imgW: number, imgH: number): HTMLCanvasElement {
+  // 单点模式：用拖拽自定义位置（无则用预设位置换算的比例）
+  const ratio =
+    mode.value === 'single'
+      ? (customPosition.value ?? positionToRatio(position.value, imgW, imgH))
+      : undefined
+  if (wmType.value === 'image') {
+    if (!logo.value) throw new Error('请先选择 Logo 图片')
+    return drawImageWatermark(bitmap, logo.value.bitmap, {
+      opacity: opacity.value / 100,
+      mode: mode.value,
+      position: position.value,
+      sizeRatio: logoSizeRatio.value / 100,
+      xRatio: ratio?.x,
+      yRatio: ratio?.y,
+    })
+  }
+  return drawWatermark(bitmap, {
+    text: text.value,
+    fontSizeRatio: fontSizeRatio.value / 100,
+    color: color.value,
+    opacity: opacity.value / 100,
+    mode: mode.value,
+    position: position.value,
+    angle: angle.value,
+    fontFamily: fontFamily.value,
+    xRatio: ratio?.x,
+    yRatio: ratio?.y,
+  })
+}
+
 function applyWatermark() {
   if (!source.value) return
   try {
-    // 单点模式：用拖拽自定义位置（无则用预设位置换算的比例）
-    const ratio =
-      mode.value === 'single'
-        ? (customPosition.value ?? positionToRatio(position.value, source.value.width, source.value.height))
-        : undefined
-    let canvas
-    if (wmType.value === 'image') {
-      if (!logo.value) {
-        showToast('请先选择 Logo 图片', 'error')
-        return
-      }
-      canvas = drawImageWatermark(source.value.bitmap, logo.value.bitmap, {
-        opacity: opacity.value / 100,
-        mode: mode.value,
-        position: position.value,
-        sizeRatio: logoSizeRatio.value / 100,
-        xRatio: ratio?.x,
-        yRatio: ratio?.y,
-      })
-    } else {
-      canvas = drawWatermark(source.value.bitmap, {
-        text: text.value,
-        fontSizeRatio: fontSizeRatio.value / 100,
-        color: color.value,
-        opacity: opacity.value / 100,
-        mode: mode.value,
-        position: position.value,
-        angle: angle.value,
-        fontFamily: fontFamily.value,
-        xRatio: ratio?.x,
-        yRatio: ratio?.y,
-      })
-    }
-    commitResult(canvas)
+    commitResult(renderWatermark(source.value.bitmap, source.value.width, source.value.height))
   } catch (error) {
     showToast(error instanceof Error ? error.message : '水印生成失败', 'error')
   }
+}
+
+async function resultFiles(): Promise<File[]> {
+  if (!source.value || !resultCanvas.value) return []
+  return [await canvasToFile(resultCanvas.value, `${source.value.name}_水印.png`)]
 }
 
 function saveResult() {
@@ -343,6 +356,101 @@ function saveResult() {
   downloadCanvas(resultCanvas.value, `${source.value.name}_水印.png`)
   showToast('已开始下载', 'success')
 }
+
+/** 批量队列：只保留已编码的 Blob 与预览 URL，画布用完即弃，避免多张大图同时驻留内存 */
+interface BatchItem {
+  name: string
+  url: string
+  blob: Blob
+}
+
+/** 一次上限：再多移动端浏览器就会因为内存吃不消而静默失败 */
+const MAX_BATCH = 30
+
+const batchInput = ref<HTMLInputElement | null>(null)
+const batchItems = ref<BatchItem[]>([])
+const batchProcessing = ref(false)
+const batchProgress = ref({ done: 0, total: 0 })
+/** 保留源 JPEG 的 Exif/ICC：默认关，EXIF 可能含 GPS，由用户显式开启 */
+const keepMeta = ref(false)
+
+function clearBatch() {
+  batchItems.value.forEach((item) => URL.revokeObjectURL(item.url))
+  batchItems.value = []
+  batchProgress.value = { done: 0, total: 0 }
+}
+
+function pickBatch() {
+  batchInput.value?.click()
+}
+
+/** 照片类源图用 JPEG 输出：批量几十张时 PNG 的体积会把内存先吃光 */
+function pickOutputType(file: File): { type: string; ext: string } {
+  return file.type === 'image/jpeg' || file.type === 'image/jpg'
+    ? { type: 'image/jpeg', ext: 'jpg' }
+    : { type: 'image/png', ext: 'png' }
+}
+
+async function runBatch(files: File[]) {
+  if (batchProcessing.value || files.length === 0) return
+  if (!source.value) {
+    showToast('先调好水印参数，再批量套用到其他图片', 'error')
+    return
+  }
+  const list = files.slice(0, MAX_BATCH)
+  if (files.length > list.length) {
+    showToast(`一次最多 ${MAX_BATCH} 张，已取前 ${MAX_BATCH} 张`, 'error')
+  }
+  clearBatch()
+  batchProcessing.value = true
+  batchProgress.value = { done: 0, total: list.length }
+  try {
+    for (const file of list) {
+      try {
+        const image = await loadImageFromFile(file)
+        const { type, ext } = pickOutputType(file)
+        const canvas = renderWatermark(image.bitmap, image.width, image.height)
+        const encoded = await canvasToBlob(canvas, type, 0.92)
+        // PNG 输出会在 withJpegMetadata 里原样返回
+        const blob = await withJpegMetadata(encoded, keepMeta.value ? file : undefined)
+        image.bitmap.close()
+        batchItems.value.push({
+          name: `${file.name.replace(/\.[^.]+$/, '')}_水印.${ext}`,
+          url: URL.createObjectURL(blob),
+          blob,
+        })
+      } catch {
+        showToast(`${file.name} 处理失败，已跳过`, 'error')
+      }
+      batchProgress.value = { done: batchProgress.value.done + 1, total: list.length }
+      // 逐张让出主线程：批量几十张时不能把页面锁死
+      await new Promise((r) => setTimeout(r, 0))
+    }
+  } finally {
+    batchProcessing.value = false
+  }
+}
+
+async function handleBatchChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  input.value = ''
+  await runBatch(files)
+}
+
+async function batchFiles(): Promise<File[]> {
+  return batchItems.value.map((item) => new File([item.blob], item.name, { type: item.blob.type }))
+}
+
+async function saveBatch() {
+  const files = await batchFiles()
+  if (files.length === 0) return
+  await saveMany(files, '批量水印.zip')
+  showToast(files.length > 1 ? '已打包下载' : '已开始下载', 'success')
+}
+
+// 组件卸载时释放批量结果的 object URL
+onUnmounted(clearBatch)
 
 function handleReplace() {
   if (!source.value || !resultCanvas.value) return
@@ -579,6 +687,41 @@ onUnmounted(() => {
         <p class="tip-text">
           参数调整后自动生成预览。水印支持叠加使用：点击「继续叠加」可在已加水印的图上再加一层。
         </p>
+
+        <!-- 批量：把上面这套参数一次套到多张图 -->
+        <div class="card-title batch-title">批量套用</div>
+        <p class="tip-text">调好一套参数后，可以一次给几十张图加同样的水印；保存全部时多张会打成一个 ZIP。</p>
+        <div class="form-row">
+          <span class="label">保留拍摄信息</span>
+          <input
+            v-model="keepMeta"
+            type="checkbox"
+            style="width: 22px; height: 22px; accent-color: var(--primary); flex: 0 0 auto; margin-left: auto"
+          />
+        </div>
+        <p class="tip-text">仅对照片类源图（JPEG 输出）有效，会把拍摄时间与机型搬过去；EXIF 可能含 GPS。</p>
+        <button
+          class="btn btn-outline"
+          style="width: 100%"
+          :disabled="batchProcessing"
+          @click="pickBatch"
+        >
+          {{ batchProcessing ? `处理中 ${batchProgress.done} / ${batchProgress.total}` : '选择多张图片' }}
+        </button>
+        <div v-if="batchItems.length > 0" class="batch-grid">
+          <img
+            v-for="item in batchItems"
+            :key="item.url"
+            class="batch-thumb"
+            :src="item.url"
+            :alt="item.name"
+          />
+        </div>
+        <div v-if="batchItems.length > 0 && !batchProcessing" class="batch-actions">
+          <ShareButton :get-files="batchFiles" variant="outline" :label="`分享 ${batchItems.length} 张`" />
+          <button class="btn btn-ghost" @click="clearBatch">清空</button>
+          <button class="btn btn-primary" @click="saveBatch">保存全部</button>
+        </div>
       </template>
     </div>
 
@@ -588,6 +731,7 @@ onUnmounted(() => {
       <button class="btn btn-ghost" :disabled="resultIndex <= 0" @click="undo">撤销</button>
       <button class="btn btn-ghost" :disabled="resultIndex >= resultStack.length - 1" @click="redo">重做</button>
       <button class="btn btn-outline" @click="handleReplace">继续叠加</button>
+      <ShareButton :get-files="resultFiles" variant="outline" />
       <button class="btn btn-primary" @click="saveResult">保存图片</button>
     </div>
 
@@ -595,16 +739,24 @@ onUnmounted(() => {
     <input
       ref="fileInput"
       type="file"
-      accept="image/*"
+      accept="image/*,.heic,.heif"
       style="display: none"
       @change="handleFileChange"
     />
     <input
       ref="logoInput"
       type="file"
-      accept="image/*"
+      accept="image/*,.heic,.heif"
       style="display: none"
       @change="handleLogoChange"
+    />
+    <input
+      ref="batchInput"
+      type="file"
+      accept="image/*,.heic,.heif"
+      multiple
+      style="display: none"
+      @change="handleBatchChange"
     />
     <!-- 渐变图标定义（供空状态图标引用） -->
     <svg width="0" height="0" style="position: absolute" aria-hidden="true">
@@ -730,5 +882,34 @@ onUnmounted(() => {
   -webkit-user-select: none;
   font-family: sans-serif;
   line-height: 1;
+}
+
+.batch-title {
+  margin-top: 18px;
+}
+
+.batch-grid {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 8px;
+}
+
+.batch-thumb {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 2px 8px rgba(31, 41, 55, 0.08);
+  background: #f1f3f9;
+}
+
+.batch-actions {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
 }
 </style>

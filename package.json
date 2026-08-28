@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "本地图片工具箱：AI 抠图、证件照换底色、九宫格切图、水印、图片压缩、长图拼接、格式转换、网格拼图，全部图片在本机处理，绝不上传服务器",
+  "description": "纯前端本地图片工具箱：AI 抠图、证件照换底色、九宫格切图、批量水印、压缩、格式转换、长图与网格拼图、超分放大、美颜、局部改色，12 个工具全部在本机处理，绝不上传服务器",
   "scripts": {
     "dev": "vite --host",
     "build": "vue-tsc -b && vite build",
@@ -12,7 +12,7 @@
   "dependencies": {
     "@imgly/background-removal": "^1.5.6",
     "@mediapipe/tasks-vision": "^1.0.1",
-    "onnxruntime-web": "^1.29.0",
+    "onnxruntime-web": "1.21.0",
     "vue": "^3.5.13"
   },
   "devDependencies": {

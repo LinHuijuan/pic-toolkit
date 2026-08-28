@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useImageDrop } from '../composables/useImageDrop'
-import { loadImageFromFile, canvasToBlob, downloadCanvas, type LoadedImage } from '../utils/imageLoader'
+import { loadImageFromFile, canvasToBlob, canvasToFile, downloadCanvas, type LoadedImage } from '../utils/imageLoader'
+import { useAiJob } from '../utils/aiJob'
 import { upscaleImage, predictUpscaleOutput, MAX_INPUT_EDGE, SUPER_RESOLUTION_SCALE } from '../utils/superResolution'
 import { showToast } from '../utils/toast'
 import { formatDuration } from '../utils/format'
 import { fetchSmallSampleFile } from '../utils/sampleImage'
+import ShareButton from '../components/ShareButton.vue'
 
 const emit = defineEmits<{ back: []; consumed: [] }>()
 const props = defineProps<{ incomingFile?: File | null }>()
@@ -16,10 +18,12 @@ useImageDrop((files) => {
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const source = ref<LoadedImage | null>(null)
+const sourceFileRef = ref<File | null>(null)
 const resultCanvas = ref<HTMLCanvasElement | null>(null)
 const resultUrl = ref('')
 const processing = ref(false)
-const progress = ref(0)
+const job = useAiJob<HTMLCanvasElement>('upscale')
+const progress = computed(() => job.percent)
 /** 真实输出尺寸与倍率：大图受输出预算约束，实际倍率可能低于模型标称的 x4 */
 const outputInfo = ref<{ w: number; h: number; ratio: number; capped: boolean } | null>(null)
 
@@ -29,8 +33,8 @@ const estimate = computed(() => {
   return bitmap ? predictUpscaleOutput(bitmap.width, bitmap.height) : null
 })
 
-const elapsedMs = ref(0)
-let timer: number | undefined
+const elapsedMs = computed(() => job.elapsedMs)
+let disposed = false
 const remainingMs = computed(() => {
   const p = progress.value
   if (!processing.value || p < 15) return null
@@ -43,6 +47,7 @@ const EMPTY_ICON = `<svg ${STROKE}><path d="M12 3.5c3.2 4.2 5.5 7.1 5.5 10a5.5 5
 
 async function processFile(file: File) {
   try {
+    sourceFileRef.value = file
     source.value = await loadImageFromFile(file)
     resultCanvas.value = null
     outputInfo.value = null
@@ -56,32 +61,47 @@ async function processFile(file: File) {
   }
 }
 
+/** 把放大结果落到界面上：跑完与切回来复用同一条路径 */
+async function applyResult(canvas: HTMLCanvasElement, bitmap: ImageBitmap) {
+  const full = canvas.width >= bitmap.width * SUPER_RESOLUTION_SCALE
+  resultCanvas.value = canvas
+  if (resultUrl.value) URL.revokeObjectURL(resultUrl.value)
+  resultUrl.value = URL.createObjectURL(await canvasToBlob(canvas, 'image/png', 1))
+  outputInfo.value = {
+    w: canvas.width,
+    h: canvas.height,
+    ratio: Math.round((canvas.width / bitmap.width) * 10) / 10,
+    capped: !full,
+  }
+}
+
 async function run() {
-  if (!source.value || processing.value) return
+  if (!source.value || !sourceFileRef.value || processing.value) return
   processing.value = true
-  progress.value = 5
-  elapsedMs.value = 0
-  timer = window.setInterval(() => (elapsedMs.value += 100), 100)
+  const file = sourceFileRef.value
+  const bitmap = source.value.bitmap
   try {
-    const bitmap = source.value.bitmap
-    const canvas = await upscaleImage(bitmap, (p) => (progress.value = p))
-    const full = canvas.width >= bitmap.width * SUPER_RESOLUTION_SCALE
-    resultCanvas.value = canvas
-    if (resultUrl.value) URL.revokeObjectURL(resultUrl.value)
-    resultUrl.value = URL.createObjectURL(await canvasToBlob(canvas, 'image/png', 1))
-    outputInfo.value = {
-      w: canvas.width,
-      h: canvas.height,
-      ratio: Math.round((canvas.width / bitmap.width) * 10) / 10,
-      capped: !full,
-    }
+    // 任务本身交给共享登记表：切去别的工具再回来，进度与结果都还在
+    const canvas = await job.run(file, (report) => {
+      report(5)
+      return upscaleImage(bitmap, (p) => report(p))
+    })
+    if (disposed) return
+    await applyResult(canvas, bitmap)
   } catch (error) {
     showToast(error instanceof Error ? error.message : '超分失败，请检查网络后重试（需下载模型）', 'error')
   } finally {
-    if (timer !== undefined) window.clearInterval(timer)
-    timer = undefined
     processing.value = false
   }
+}
+
+/** 接着上次离开时的那次放大：在跑就继续显示进度，跑完就直接接回结果 */
+async function restoreJob(file: File) {
+  sourceFileRef.value = file
+  source.value = await loadImageFromFile(file)
+  const done = job.result
+  if (job.status === 'done' && done) await applyResult(done, source.value.bitmap)
+  else if (job.status === 'running') run()
 }
 
 function pickImage() {
@@ -105,6 +125,12 @@ function handleFileChange(event: Event) {
   processFile(file)
 }
 
+async function resultFiles(): Promise<File[]> {
+  if (!source.value || !resultCanvas.value) return []
+  const ratio = outputInfo.value?.ratio ?? SUPER_RESOLUTION_SCALE
+  return [await canvasToFile(resultCanvas.value, `${source.value.name}_x${ratio}.png`)]
+}
+
 function saveResult() {
   if (!source.value || !resultCanvas.value) return
   const ratio = outputInfo.value?.ratio ?? SUPER_RESOLUTION_SCALE
@@ -116,11 +142,14 @@ onMounted(() => {
   if (props.incomingFile) {
     processFile(props.incomingFile).catch(() => showToast('图片加载失败', 'error'))
     emit('consumed')
+    return
   }
+  const file = job.input
+  if (file && job.status !== 'idle') restoreJob(file).catch(() => showToast('图片加载失败', 'error'))
 })
 
 onUnmounted(() => {
-  if (timer !== undefined) window.clearInterval(timer)
+  disposed = true
   if (resultUrl.value) URL.revokeObjectURL(resultUrl.value)
 })
 </script>
@@ -155,7 +184,7 @@ onUnmounted(() => {
                   ，约再 {{ formatDuration(remainingMs) }}</template
                 >）
               </p>
-              <p class="tip-text">分块推理，页面可以随时切走，不会卡住。</p>
+              <p class="tip-text">分块推理，进度会一块一块推进；切去别的工具也不会打断，回来接着看。</p>
             </div>
             <!-- 完成后显示结果 -->
             <div v-else-if="resultUrl && outputInfo" class="compare-wrap">
@@ -183,12 +212,13 @@ onUnmounted(() => {
 
     <div v-if="source" class="bottom-bar">
       <button class="btn btn-ghost" @click="pickImage">重新选图</button>
+      <ShareButton :get-files="resultFiles" variant="outline" :disabled="!resultUrl || processing" label="分享放大图" />
       <button class="btn btn-primary" :disabled="!resultUrl || processing" @click="saveResult">
         保存超分图{{ outputInfo ? `（x${outputInfo.ratio}）` : '' }}
       </button>
     </div>
 
-    <input ref="fileInput" type="file" accept="image/*" style="display: none" @change="handleFileChange" />
+    <input ref="fileInput" type="file" accept="image/*,.heic,.heif" style="display: none" @change="handleFileChange" />
     <svg width="0" height="0" style="position: absolute" aria-hidden="true">
       <defs>
         <linearGradient id="icon-grad" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">

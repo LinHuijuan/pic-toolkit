@@ -3,6 +3,7 @@ import { ref, watch, computed, defineAsyncComponent, onMounted, onUnmounted } fr
 import { DROP_EVENT } from './composables/useImageDrop'
 import { aiModel } from './utils/aiModel'
 import { formatDuration } from './utils/format'
+import { isImageFile } from './utils/imageLoader'
 
 type ViewName =
   | 'home'
@@ -116,7 +117,7 @@ const isModelDownloading = computed(() => aiModel.stage === 'downloading' || aiM
 const dragDepth = ref(0)
 const isDragging = ref(false)
 
-const imageFiles = (list: FileList): File[] => Array.from(list).filter((f) => f.type.startsWith('image/'))
+const imageFiles = (list: FileList): File[] => Array.from(list).filter(isImageFile)
 
 function onDragEnter(e: DragEvent) {
   if (!e.dataTransfer?.types.includes('Files')) return

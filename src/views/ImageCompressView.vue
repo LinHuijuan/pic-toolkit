@@ -2,9 +2,17 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useImageDrop } from '../composables/useImageDrop'
 import { loadImageFromFile, downloadBlob, type LoadedImage } from '../utils/imageLoader'
-import { compressBitmap, compressToTargetSize } from '../utils/imageCompress'
+import { saveMany } from '../utils/zip'
+import {
+  compressBitmap,
+  compressToTargetSize,
+  canEncodeWebp,
+  type CompressFormat,
+  type EncodedFormat,
+} from '../utils/imageCompress'
 import { showToast } from '../utils/toast'
 import { fetchSampleFiles } from '../utils/sampleImage'
+import ShareButton from '../components/ShareButton.vue'
 
 const emit = defineEmits<{ back: []; consumed: [] }>()
 
@@ -18,6 +26,8 @@ useImageDrop((files) => {
 const fileInput = ref<HTMLInputElement | null>(null)
 const items = ref<CompressItem[]>([])
 const mode = ref<'quality' | 'target'>('quality')
+/** 输出格式：auto 沿用「透明出 PNG、其余出 JPEG」，WebP 用于同画质再省一档 */
+const format = ref<CompressFormat>('auto')
 const quality = ref(70) // 百分比
 const targetSize = ref(500) // 目标体积（KB）
 const processing = ref(false)
@@ -28,10 +38,12 @@ const maxDimension = ref(1920) // 最长边限制（px）
 interface CompressItem {
   id: number
   source: LoadedImage
+  /** 源文件本体：搬元数据时要按原始字节读一次 */
+  file: File
   originalSize: number
   compressed?: {
     blob: Blob
-    type: string
+    format: EncodedFormat
     width: number
     height: number
   }
@@ -66,6 +78,9 @@ async function handleFileChange(event: Event) {
   }
 }
 
+/** 保留源 JPEG 的 Exif/ICC：默认关，EXIF 可能含 GPS，由用户显式开启 */
+const keepMeta = ref(false)
+
 /** 加载并压缩一组图片 */
 async function processFiles(files: File[]) {
   for (const file of files) {
@@ -73,6 +88,7 @@ async function processFiles(files: File[]) {
     items.value.push({
       id: idSeed++,
       source,
+      file,
       originalSize: file.size,
       fallbackUrl: fallbackDataUrl(source),
     })
@@ -111,20 +127,27 @@ async function runCompress() {
       try {
         let result
         if (mode.value === 'target') {
-          result = await compressToTargetSize(item.source.bitmap, targetSize.value * 1024, maxDim)
-          // 透明 PNG 为无损格式，无法按目标体积压缩
-          if (result.type === 'image/png' && result.blob.size > targetSize.value * 1024) {
-            throw new Error('透明 PNG 无法按目标体积压缩，请改用质量模式')
+          result = await compressToTargetSize(item.source.bitmap, {
+            targetBytes: targetSize.value * 1024,
+            maxDimension: maxDim,
+            format: format.value,
+            metadataFrom: keepMeta.value ? item.file : undefined,
+          })
+          // 命中 PNG 说明是无损输出，体积不可控
+          if (result.format === 'png' && result.blob.size > targetSize.value * 1024) {
+            throw new Error('透明图按体积压缩请选 WebP，或改用按质量模式')
           }
         } else {
           result = await compressBitmap(item.source.bitmap, {
             quality: quality.value / 100,
             maxDimension: maxDim,
+            format: format.value,
+            metadataFrom: keepMeta.value ? item.file : undefined,
           })
         }
         item.compressed = {
           blob: result.blob,
-          type: result.type,
+          format: result.format,
           width: result.width,
           height: result.height,
         }
@@ -141,23 +164,60 @@ async function runCompress() {
   }
 }
 
-function saveAll() {
-  const ready = items.value.filter((item) => item.compressed && !item.error)
-  if (ready.length === 0) return
-  ready.forEach((item, index) => {
-    setTimeout(() => {
-      const ext = item.compressed!.type === 'image/jpeg' ? 'jpg' : 'png'
-      downloadBlob(item.compressed!.blob, `${item.source.name}_压缩.${ext}`)
-    }, index * 300)
-  })
-  showToast('已开始下载', 'success')
+/** 实际编码器 → 文件名后缀与 MIME，回退成 PNG 时文件名也不会撒谎 */
+const FORMAT_EXT: Record<EncodedFormat, string> = { png: 'png', jpeg: 'jpg', webp: 'webp' }
+const FORMAT_MIME: Record<EncodedFormat, string> = {
+  png: 'image/png',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+}
+const FORMAT_LABEL: Record<EncodedFormat, string> = { png: 'PNG', jpeg: 'JPG', webp: 'WebP' }
+
+/** 结果行上显示的格式名 */
+function formatLabel(item: CompressItem): string {
+  return item.compressed ? FORMAT_LABEL[item.compressed.format] : ''
+}
+
+/** 切到 WebP 前先确认浏览器真能编码，否则选了也是白选 */
+async function chooseFormat(next: CompressFormat) {
+  if (next === format.value) return
+  if (next === 'webp' && !(await canEncodeWebp())) {
+    showToast('当前浏览器不支持 WebP 编码，已保持原格式', 'error')
+    return
+  }
+  format.value = next
+  runCompress()
+}
+
+/** 单张压缩结果 → File（下载与分享共用同一份产物与命名） */
+function resultFile(item: CompressItem): File | null {
+  if (!item.compressed || item.error) return null
+  const { blob, format: encoded } = item.compressed
+  const type = FORMAT_MIME[encoded]
+  return new File([blob], `${item.source.name}_压缩.${FORMAT_EXT[encoded]}`, { type })
+}
+
+/** 全部可导出的压缩结果 */
+function readyFiles(): File[] {
+  return items.value.map((item) => resultFile(item)).flatMap((file) => (file ? [file] : []))
+}
+
+async function resultFiles(): Promise<File[]> {
+  return readyFiles()
+}
+
+async function saveAll() {
+  const files = readyFiles()
+  if (files.length === 0) return
+  await saveMany(files, '图片压缩.zip')
+  showToast(files.length > 1 ? '已打包下载' : '已开始下载', 'success')
 }
 
 /** 单张保存压缩结果 */
 function saveOne(item: CompressItem) {
-  if (!item.compressed || item.error) return
-  const ext = item.compressed.type === 'image/jpeg' ? 'jpg' : 'png'
-  downloadBlob(item.compressed.blob, `${item.source.name}_压缩.${ext}`)
+  const file = resultFile(item)
+  if (!file) return
+  downloadBlob(file, file.name)
   showToast('已开始下载', 'success')
 }
 
@@ -350,6 +410,20 @@ function fallbackDataUrl(source: LoadedImage): string {
               </div>
             </div>
           </div>
+          <div class="form-row">
+            <span class="label">输出格式</span>
+            <div class="seg-control" style="flex: 1">
+              <div class="seg-item" :class="{ active: format === 'auto' }" @click="chooseFormat('auto')">
+                智能
+              </div>
+              <div class="seg-item" :class="{ active: format === 'jpeg' }" @click="chooseFormat('jpeg')">
+                JPG
+              </div>
+              <div class="seg-item" :class="{ active: format === 'webp' }" @click="chooseFormat('webp')">
+                WebP
+              </div>
+            </div>
+          </div>
           <div v-if="mode === 'quality'" class="range-row">
             <span class="label">压缩质量</span>
             <input v-model.number="quality" type="range" min="10" max="100" step="5" @change="runCompress" />
@@ -389,9 +463,20 @@ function fallbackDataUrl(source: LoadedImage): string {
               />
             </div>
           </div>
+          <div class="form-row">
+            <span class="label">保留拍摄信息</span>
+            <input
+              v-model="keepMeta"
+              type="checkbox"
+              style="width: 22px; height: 22px; accent-color: var(--primary); flex: 0 0 auto; margin-left: auto"
+              @change="runCompress"
+            />
+          </div>
           <p class="tip-text">
-            {{ mode === 'target' ? '自动搜索质量使每张图接近目标体积，透明 PNG 无法按体积压缩。' : '开启最长边后按等比缩放（如 1920 / 2560 / 4096），可进一步减小体积。' }}
-            调整后自动重新压缩。
+            {{ mode === 'target' ? '自动搜索质量使每张图接近目标体积；透明图要压体积请选 WebP（PNG 无损，只能靠限制最长边）。' : '开启最长边后按等比缩放（如 1920 / 2560 / 4096），可进一步减小体积。' }}
+            WebP 同画质通常比 JPG 再省 25~35%，且支持透明；选 JPG 而图含透明时会自动回退为 PNG，
+            浏览器不支持 WebP 编码时也会自动回退。保留拍摄信息只对 JPEG 输出有效，
+            会把源图的拍摄时间、机型等一起带过去，注意 EXIF 里可能含 GPS 位置。调整后自动重新压缩。
           </p>
         </div>
 
@@ -419,6 +504,7 @@ function fallbackDataUrl(source: LoadedImage): string {
                     {{ percentOf(item) > 0 ? `-${percentOf(item)}%` : percentOf(item) < 0 ? `+${-percentOf(item)}%` : '0%' }}
                   </span>
                   <span class="item-dim">{{ item.compressed.width }}×{{ item.compressed.height }}</span>
+                  <span class="item-dim">{{ formatLabel(item) }}</span>
                 </div>
                 <div v-else class="item-sizes">等待压缩…</div>
               </div>
@@ -440,6 +526,7 @@ function fallbackDataUrl(source: LoadedImage): string {
     <!-- 底部操作栏 -->
     <div v-if="items.length > 0" class="bottom-bar">
       <button class="btn btn-ghost" @click="pickImages">继续加图</button>
+      <ShareButton :get-files="resultFiles" variant="outline" :disabled="processing" label="分享全部" />
       <button class="btn btn-primary" :disabled="processing" @click="saveAll">保存全部</button>
     </div>
 
@@ -447,7 +534,7 @@ function fallbackDataUrl(source: LoadedImage): string {
     <input
       ref="fileInput"
       type="file"
-      accept="image/*"
+      accept="image/*,.heic,.heif"
       multiple
       style="display: none"
       @change="handleFileChange"

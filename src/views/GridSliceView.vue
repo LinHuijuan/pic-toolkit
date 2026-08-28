@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useImageDrop } from '../composables/useImageDrop'
-import { loadImageFromFile, downloadCanvas, type LoadedImage } from '../utils/imageLoader'
+import { loadImageFromFile, downloadCanvas, canvasToFile, type LoadedImage } from '../utils/imageLoader'
+import { saveMany } from '../utils/zip'
+import ShareButton from '../components/ShareButton.vue'
 import { sliceGrid, buildSlicePreview, buildSliceFilename, type SliceResult } from '../utils/gridSlice'
 import { showToast } from '../utils/toast'
 import { fetchSampleFile } from '../utils/sampleImage'
@@ -169,18 +171,28 @@ function saveFull() {
   }
 }
 
-function saveAll() {
-  if (!source.value || slices.value.length === 0) return
-  // 浏览器会拦截连续多张下载，逐张触发并提示
-  slices.value.forEach((slice, index) => {
-    setTimeout(() => {
-      downloadCanvas(
+/** 全部切块物料化成 File：分享面板一次拿走，省掉「逐张下载再逐张选图」 */
+async function sliceFiles(): Promise<File[]> {
+  const src = source.value
+  if (!src || slices.value.length === 0) return []
+  const files: File[] = []
+  for (const slice of slices.value) {
+    files.push(
+      await canvasToFile(
         slice.canvas,
-        buildSliceFilename(source.value!.name, slice.row, slice.col, rows.value, cols.value),
-      )
-    }, index * 300)
-  })
-  showToast('已开始下载', 'success')
+        buildSliceFilename(src.name, slice.row, slice.col, rows.value, cols.value),
+      ),
+    )
+  }
+  return files
+}
+
+async function saveAll() {
+  if (!source.value || slices.value.length === 0) return
+  const files = await sliceFiles()
+  // 一次打包代替连点下载：九宫格就是 9 个文件，逐张下载必然被浏览器拦截
+  await saveMany(files, `${source.value.name}_九宫格切图.zip`)
+  showToast(files.length > 1 ? '已打包下载' : '已开始下载', 'success')
 }
 
 // 切片变化后绘制整体拼回预览（flush: post 确保画布已挂载）
@@ -327,7 +339,7 @@ onUnmounted(() => {
             />
           </div>
           <p class="tip-text">
-            点击单块可查看大图，弹层内可单独下载。提示：手机浏览器会拦截连续多张下载，点击「保存全部」后请逐张允许。
+            点击单块可查看大图，弹层内可单独下载。「保存全部」只触发一次下载：多张会打成一个 ZIP，手机上不再需要逐张允许。
           </p>
         </div>
       </template>
@@ -336,6 +348,7 @@ onUnmounted(() => {
     <!-- 底部操作栏 -->
     <div v-if="source" class="bottom-bar">
       <button class="btn btn-ghost" @click="pickImage">重新选图</button>
+      <ShareButton :get-files="sliceFiles" variant="outline" label="分享全部" title="九宫格切图" />
       <button class="btn btn-primary" @click="saveAll">保存全部</button>
     </div>
 
@@ -343,7 +356,7 @@ onUnmounted(() => {
     <input
       ref="fileInput"
       type="file"
-      accept="image/*"
+      accept="image/*,.heic,.heif"
       style="display: none"
       @change="handleFileChange"
     />

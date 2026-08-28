@@ -15,6 +15,7 @@ import {
 import { detectSmartCrop } from '../utils/smartCrop'
 import { showToast } from '../utils/toast'
 import { fetchSampleFile } from '../utils/sampleImage'
+import ShareButton from '../components/ShareButton.vue'
 
 const emit = defineEmits<{ back: []; navigate: [view: NextToolKey, file?: File]; consumed: [] }>()
 
@@ -481,13 +482,29 @@ function exportCanvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
   })
 }
 
+/** 按当前格式导出为 File（下载与分享共用同一份编码结果与命名） */
+async function buildResultFile(): Promise<File | null> {
+  if (!source.value) return null
+  const canvas = buildOutput()
+  const ext = saveFormat.value === 'jpg' ? 'jpg' : 'png'
+  const type = saveFormat.value === 'jpg' ? 'image/jpeg' : 'image/png'
+  const blob = await exportCanvasToBlob(canvas)
+  return new File([blob], `${source.value.name}_编辑.${ext}`, { type })
+}
+
+async function resultFiles(): Promise<File[]> {
+  // 变换画布尚未生成时无结果可分享，返回空列表而不是抛错
+  if (!transformCanvas) return []
+  const file = await buildResultFile()
+  return file ? [file] : []
+}
+
 async function saveResult() {
   if (!source.value) return
   try {
-    const canvas = buildOutput()
-    const ext = saveFormat.value === 'jpg' ? 'jpg' : 'png'
-    const blob = await exportCanvasToBlob(canvas)
-    downloadBlob(blob, `${source.value.name}_编辑.${ext}`)
+    const file = await buildResultFile()
+    if (!file) return
+    downloadBlob(file, file.name)
     showToast('已开始下载', 'success')
   } catch (error) {
     showToast(error instanceof Error ? error.message : '保存失败', 'error')
@@ -718,6 +735,7 @@ onUnmounted(() => {
       </div>
       <button class="btn btn-ghost" @click="pickImage">重新选图</button>
       <button class="btn btn-outline" @click="showNextTools = !showNextTools">继续处理</button>
+      <ShareButton :get-files="resultFiles" variant="outline" />
       <button class="btn btn-primary" @click="saveResult">保存图片</button>
     </div>
 
@@ -725,7 +743,7 @@ onUnmounted(() => {
     <input
       ref="fileInput"
       type="file"
-      accept="image/*"
+      accept="image/*,.heic,.heif"
       style="display: none"
       @change="handleFileChange"
     />

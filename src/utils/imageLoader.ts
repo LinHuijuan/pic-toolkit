@@ -1,8 +1,11 @@
 /**
  * 图片加载与导出工具
  * - 使用 createImageBitmap 加载，自动处理手机拍照的 EXIF 方向
+ * - HEIC / HEIF 按文件头识别（Windows 上常常没有 MIME），原生解不动时走 libheif 兜底
  * - 提供 canvas → Blob → 下载 的导出链路
  */
+
+import { decodeHeic, isHeicFile, heicErrorMessage } from './heic'
 
 export interface LoadedImage {
   bitmap: ImageBitmap
@@ -11,13 +14,38 @@ export interface LoadedImage {
   name: string
 }
 
+/** MIME 说不上话时（Windows 对 HEIC 常给空串）按后缀放行 */
+const IMAGE_EXT = /\.(png|jpe?g|webp|gif|bmp|svg|avif|tiff?|heic|heif|heifs)$/i
+
+/** 是否按图片处理：MIME 或后缀任一命中 */
+export function isImageFile(file: File): boolean {
+  return file.type.startsWith('image/') || IMAGE_EXT.test(file.name)
+}
+
 /** 从 File 加载图片（自动纠正手机拍照方向） */
 export async function loadImageFromFile(file: File): Promise<LoadedImage> {
-  if (!file.type.startsWith('image/')) {
+  const heic = await isHeicFile(file, file.name)
+  if (!heic && !isImageFile(file)) {
     throw new Error('请选择图片文件')
   }
-  // imageOrientation: 'from-image' 自动应用 EXIF 方向，解决手机拍照旋转问题
-  const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' })
+
+  let bitmap: ImageBitmap
+  try {
+    // imageOrientation: 'from-image' 自动应用 EXIF 方向，解决手机拍照旋转问题
+    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' })
+  } catch (error) {
+    if (!heic) {
+      console.error(error)
+      throw new Error('无法解码这张图片，请确认文件完整或另存为 JPG / PNG')
+    }
+    try {
+      bitmap = await createImageBitmap(await decodeHeic(file), { imageOrientation: 'from-image' })
+    } catch (decodeError) {
+      console.error(decodeError)
+      throw new Error(heicErrorMessage(decodeError))
+    }
+  }
+
   return {
     bitmap,
     width: bitmap.width,
@@ -26,14 +54,30 @@ export async function loadImageFromFile(file: File): Promise<LoadedImage> {
   }
 }
 
-/** File → DataURL（用于 @imgly/background-removal 抠图输入） */
-export function fileToDataUrl(file: File): Promise<string> {
+function readAsDataUrl(source: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = () => resolve(reader.result as string)
     reader.onerror = () => reject(new Error('读取图片失败'))
-    reader.readAsDataURL(file)
+    reader.readAsDataURL(source)
   })
+}
+
+/**
+ * 图片 → DataURL（用于 @imgly/background-removal 抠图与自定义背景图输入）
+ * 输入方（<img> / 模型内部的 createImageBitmap）在 Windows 上一样解不动 HEIC，
+ * 所以这里先本地转成 JPEG；解码组件拿不到时退回原文件，
+ * 让 iOS Safari 这类原生支持 HEIC 的环境仍然走得通。
+ */
+export async function fileToDataUrl(file: File): Promise<string> {
+  if (await isHeicFile(file, file.name)) {
+    try {
+      return await readAsDataUrl(await decodeHeic(file))
+    } catch {
+      /* 退回原文件 */
+    }
+  }
+  return readAsDataUrl(file)
 }
 
 /** ImageBitmap → canvas */
@@ -118,4 +162,18 @@ export function downloadBlob(blob: Blob, filename: string): void {
 export async function downloadCanvas(canvas: HTMLCanvasElement, filename: string): Promise<void> {
   const blob = await canvasToBlob(canvas, 'image/png')
   downloadBlob(blob, filename)
+}
+
+/**
+ * canvas → File
+ * Web Share API 只接受 File（需要文件名与 MIME），导出前先物料化成 File 才能分享
+ */
+export async function canvasToFile(
+  canvas: HTMLCanvasElement,
+  filename: string,
+  type = 'image/png',
+  quality = 1,
+): Promise<File> {
+  const blob = await canvasToBlob(canvas, type, quality)
+  return new File([blob], filename, { type })
 }

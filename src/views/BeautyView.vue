@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useImageDrop } from '../composables/useImageDrop'
-import { loadImageFromFile, downloadCanvas, type LoadedImage } from '../utils/imageLoader'
+import { loadImageFromFile, downloadCanvas, canvasToFile, type LoadedImage } from '../utils/imageLoader'
+import ShareButton from '../components/ShareButton.vue'
 import { beautifyImage } from '../utils/imageBeauty'
+import { useAiJob } from '../utils/aiJob'
 import { showToast } from '../utils/toast'
 import { fetchSampleFile } from '../utils/sampleImage'
 
@@ -13,12 +15,21 @@ useImageDrop((files) => {
   if (files[0]) processFile(files[0])
 })
 
+/** 结果连同产出它的那组参数一起存：切回来时滑块和图必须对得上 */
+interface BeautyResult {
+  canvas: HTMLCanvasElement
+  smoothness: number
+  brightness: number
+}
+
 const fileInput = ref<HTMLInputElement | null>(null)
 const source = ref<LoadedImage | null>(null)
+const sourceFileRef = ref<File | null>(null)
 const resultCanvas = ref<HTMLCanvasElement | null>(null)
 const resultUrl = ref('')
 const originUrl = ref('')
 const processing = ref(false)
+const job = useAiJob<BeautyResult>('beauty')
 
 const smoothness = ref(50)
 const brightness = ref(8)
@@ -29,6 +40,7 @@ const EMPTY_ICON = `<svg ${STROKE}><path d="M12 3.5c3.2 4.2 5.5 7.1 5.5 10a5.5 5
 
 async function processFile(file: File) {
   try {
+    sourceFileRef.value = file
     source.value = await loadImageFromFile(file)
     originUrl.value = URL.createObjectURL(file)
     resultCanvas.value = null
@@ -39,20 +51,52 @@ async function processFile(file: File) {
   }
 }
 
+/** 结果上屏时把滑块摆回产出这张图的参数，界面与实际效果不会各说各话 */
+function applyResult(result: BeautyResult) {
+  resultCanvas.value = result.canvas
+  resultUrl.value = result.canvas.toDataURL('image/png')
+  smoothness.value = result.smoothness
+  brightness.value = result.brightness
+}
+
+/** 接回在跑的任务时要沿用登记表里的签名：此时滑块已回到默认值，自己拼会对不上。
+ *  只能走这个一次性开关，run 是模板上的事件处理器，不能带参数。 */
+let attachSig: string | null = null
+
 async function run() {
-  if (!source.value) return
+  if (!source.value || !sourceFileRef.value) return
   processing.value = true
+  const params = { smoothness: smoothness.value, brightness: brightness.value }
+  const sig = attachSig ?? `${params.smoothness}:${params.brightness}`
+  attachSig = null
   try {
-    const canvas = await beautifyImage(source.value.bitmap, {
-      smoothness: smoothness.value,
-      brightness: brightness.value,
-    })
-    resultCanvas.value = canvas
-    resultUrl.value = canvas.toDataURL('image/png')
+    // 参数签名参与复用判断：滑块一动签名就变，必须真跑一次，不能拿上一次的结果糊弄
+    const result = await job.run(
+      sourceFileRef.value,
+      async () => ({ canvas: await beautifyImage(source.value!.bitmap, params), ...params }),
+      sig,
+    )
+    applyResult(result)
   } catch (error) {
     showToast(error instanceof Error ? error.message : '美颜失败，请检查网络后重试（需下载模型）', 'error')
   } finally {
     processing.value = false
+  }
+}
+
+/** 切走再回来：跑完的直接接回结果，还在跑的自己会写回登记表 */
+async function restoreJob(file: File) {
+  sourceFileRef.value = file
+  source.value = await loadImageFromFile(file)
+  originUrl.value = URL.createObjectURL(file)
+  const done = job.result
+  if (job.status === 'done' && done) {
+    applyResult(done)
+    return
+  }
+  if (job.status === 'running') {
+    attachSig = job.variant
+    run()
   }
 }
 
@@ -67,6 +111,11 @@ async function loadSample() {
   } catch (error) {
     showToast(error instanceof Error ? error.message : '示例图加载失败', 'error')
   }
+}
+
+async function resultFiles(): Promise<File[]> {
+  if (!source.value || !resultCanvas.value) return []
+  return [await canvasToFile(resultCanvas.value, `${source.value.name}_美颜.png`)]
 }
 
 function saveResult() {
@@ -87,7 +136,10 @@ onMounted(() => {
   if (props.incomingFile) {
     processFile(props.incomingFile).catch(() => showToast('图片加载失败', 'error'))
     emit('consumed')
+    return
   }
+  const file = job.input
+  if (file && job.status !== 'idle') restoreJob(file).catch(() => showToast('图片加载失败', 'error'))
 })
 
 onUnmounted(() => {
@@ -150,10 +202,11 @@ onUnmounted(() => {
 
     <div v-if="source" class="bottom-bar">
       <button class="btn btn-ghost" @click="pickImage">重新选图</button>
+      <ShareButton :get-files="resultFiles" variant="outline" :disabled="!resultUrl || processing" />
       <button class="btn btn-primary" :disabled="!resultUrl || processing" @click="saveResult">保存图片</button>
     </div>
 
-    <input ref="fileInput" type="file" accept="image/*" style="display: none" @change="handleFileChange" />
+    <input ref="fileInput" type="file" accept="image/*,.heic,.heif" style="display: none" @change="handleFileChange" />
     <svg width="0" height="0" style="position: absolute" aria-hidden="true">
       <defs>
         <linearGradient id="icon-grad" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">

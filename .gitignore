@@ -21,3 +21,6 @@ Thumbs.db
 # 本地环境
 .env.local
 .env.*.local
+
+# 本地无头浏览器验证脚本与产物（不入库）
+.tmp-cdp/

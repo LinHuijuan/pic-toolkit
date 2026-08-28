@@ -2,9 +2,11 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useImageDrop } from '../composables/useImageDrop'
 import { loadImageFromFile, downloadBlob, type LoadedImage } from '../utils/imageLoader'
+import { saveMany } from '../utils/zip'
 import { convertImageFormat, type OutputFormat } from '../utils/imageFormat'
 import { showToast } from '../utils/toast'
 import { fetchSampleFiles } from '../utils/sampleImage'
+import ShareButton from '../components/ShareButton.vue'
 
 const emit = defineEmits<{ back: []; consumed: [] }>()
 
@@ -18,12 +20,16 @@ useImageDrop((files) => {
 const fileInput = ref<HTMLInputElement | null>(null)
 const items = ref<ConvertItem[]>([])
 const targetFormat = ref<OutputFormat>('jpeg')
+/** 保留源 JPEG 的 Exif/ICC：默认关，EXIF 可能含 GPS，导出前由用户显式选择 */
+const keepMeta = ref(false)
 const processing = ref(false)
 const doneCount = ref(0)
 
 interface ConvertItem {
   id: number
   source: LoadedImage
+  /** 源文件本体：搬元数据时要按原始字节读一次 */
+  file: File
   originalType: string
   result?: {
     blob: Blob
@@ -72,6 +78,7 @@ async function processFiles(files: File[]) {
     items.value.push({
       id: idSeed++,
       source,
+      file,
       originalType: file.type,
       fallbackUrl: fallbackDataUrl(source),
     })
@@ -106,7 +113,11 @@ async function runConvert() {
   try {
     for (const item of items.value) {
       try {
-        const result = await convertImageFormat(item.source.bitmap, targetFormat.value)
+        const result = await convertImageFormat(
+          item.source.bitmap,
+          targetFormat.value,
+          keepMeta.value ? item.file : undefined,
+        )
         item.result = { blob: result.blob, type: result.type }
         item.error = undefined
         setPreviewUrl(item, URL.createObjectURL(result.blob))
@@ -126,23 +137,34 @@ function switchFormat(format: OutputFormat) {
   runConvert()
 }
 
-function saveAll() {
-  const ready = items.value.filter((item) => item.result && !item.error)
-  if (ready.length === 0) return
-  ready.forEach((item, index) => {
-    setTimeout(() => {
-      const ext = item.result!.type === 'image/jpeg' ? 'jpg' : item.result!.type === 'image/webp' ? 'webp' : 'png'
-      downloadBlob(item.result!.blob, `${item.source.name}.${ext}`)
-    }, index * 300)
-  })
-  showToast('已开始下载', 'success')
+/** 单张转换结果 → File（下载与分享共用同一份产物与命名） */
+function resultFile(item: ConvertItem): File | null {
+  if (!item.result || item.error) return null
+  const ext = item.result.type === 'image/jpeg' ? 'jpg' : item.result.type === 'image/webp' ? 'webp' : 'png'
+  return new File([item.result.blob], `${item.source.name}.${ext}`, { type: item.result.type })
+}
+
+/** 全部可导出的转换结果 */
+function readyFiles(): File[] {
+  return items.value.map((item) => resultFile(item)).flatMap((file) => (file ? [file] : []))
+}
+
+async function resultFiles(): Promise<File[]> {
+  return readyFiles()
+}
+
+async function saveAll() {
+  const files = readyFiles()
+  if (files.length === 0) return
+  await saveMany(files, '格式转换.zip')
+  showToast(files.length > 1 ? '已打包下载' : '已开始下载', 'success')
 }
 
 /** 单张保存转换结果 */
 function saveOne(item: ConvertItem) {
-  if (!item.result || item.error) return
-  const ext = item.result.type === 'image/jpeg' ? 'jpg' : item.result.type === 'image/webp' ? 'webp' : 'png'
-  downloadBlob(item.result.blob, `${item.source.name}.${ext}`)
+  const file = resultFile(item)
+  if (!file) return
+  downloadBlob(file, file.name)
   showToast('已开始下载', 'success')
 }
 
@@ -228,8 +250,21 @@ function fallbackDataUrl(source: LoadedImage): string {
               {{ f.label }}
             </div>
           </div>
+          <div v-if="targetFormat === 'jpeg'" class="form-row">
+            <span class="label">保留拍摄信息</span>
+            <input
+              v-model="keepMeta"
+              type="checkbox"
+              style="width: 22px; height: 22px; accent-color: var(--primary); flex: 0 0 auto; margin-left: auto"
+              @change="runConvert"
+            />
+          </div>
           <p class="tip-text">
             JPG 不支持透明背景，透明图片自动填充白色；PNG / WebP 保留透明通道。切换后自动重新转换。
+            <template v-if="targetFormat === 'jpeg'">
+              保留拍摄信息会把源图的拍摄时间、机型等一起带过去；源图不是 JPEG 时无效果。注意 EXIF
+              里可能含 GPS 位置，分享前请自行斟酌。
+            </template>
           </p>
         </div>
 
@@ -271,6 +306,7 @@ function fallbackDataUrl(source: LoadedImage): string {
     <!-- 底部操作栏 -->
     <div v-if="items.length > 0" class="bottom-bar">
       <button class="btn btn-ghost" @click="pickImages">继续加图</button>
+      <ShareButton :get-files="resultFiles" variant="outline" :disabled="processing" label="分享全部" />
       <button class="btn btn-primary" :disabled="processing" @click="saveAll">保存全部</button>
     </div>
 
@@ -278,7 +314,7 @@ function fallbackDataUrl(source: LoadedImage): string {
     <input
       ref="fileInput"
       type="file"
-      accept="image/*"
+      accept="image/*,.heic,.heif"
       multiple
       style="display: none"
       @change="handleFileChange"

@@ -2,9 +2,11 @@
  * 图片格式转换工具
  * - PNG / JPEG / WebP 互转
  * - 透明图片转 JPEG 时自动填充白色背景
+ * - 可选把源 JPEG 的 Exif / ICC 搬到输出，避免一次转换就把拍摄信息丢掉
  */
 
 import { canvasToBlob, isCanvasTranslucent } from './imageLoader'
+import { withJpegMetadata } from './exif'
 
 export type OutputFormat = 'png' | 'jpeg' | 'webp'
 
@@ -21,6 +23,7 @@ const JPEG_QUALITY = 0.92
 export async function convertImageFormat(
   bitmap: ImageBitmap,
   format: OutputFormat,
+  metadataFrom?: Blob,
 ): Promise<FormatConvertResult> {
   let canvas = document.createElement('canvas')
   canvas.width = bitmap.width
@@ -61,6 +64,8 @@ export async function convertImageFormat(
       break
   }
 
-  const blob = await canvasToBlob(canvas, type, quality)
+  const encoded = await canvasToBlob(canvas, type, quality)
+  // 只有 JPEG 输出会被真正改写，PNG / WebP 原样返回
+  const blob = await withJpegMetadata(encoded, metadataFrom)
   return { blob, type, width: canvas.width, height: canvas.height }
 }

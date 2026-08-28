@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, nextTick, onMounted, onUnmounted, type CSSProperties } from 'vue'
 import { useImageDrop } from '../composables/useImageDrop'
-import { loadImageFromFile, bitmapToCanvas, downloadCanvas, type LoadedImage } from '../utils/imageLoader'
+import { loadImageFromFile, bitmapToCanvas, canvasToFile, downloadCanvas, type LoadedImage } from '../utils/imageLoader'
 import {
   replaceColorInRegion,
   hexToRgb,
@@ -11,6 +11,7 @@ import {
 } from '../utils/colorReplace'
 import { showToast } from '../utils/toast'
 import { fetchSampleFile } from '../utils/sampleImage'
+import ShareButton from '../components/ShareButton.vue'
 
 const emit = defineEmits<{ back: []; consumed: [] }>()
 const props = defineProps<{ incomingFile?: File | null }>()
@@ -377,6 +378,12 @@ function onStagePointerUp() {
   pushSnapshot()
 }
 
+async function resultFiles(): Promise<File[]> {
+  // resultCanvas 是普通变量，尚未生成结果画布时返回空列表而不是抛错
+  if (!source.value || !resultCanvas) return []
+  return [await canvasToFile(resultCanvas, `${source.value.name}_改色.png`)]
+}
+
 function saveResult() {
   if (!source.value || !resultCanvas) return
   downloadCanvas(resultCanvas, `${source.value.name}_改色.png`)
@@ -514,10 +521,11 @@ onUnmounted(() => {
 
     <div v-if="source" class="bottom-bar">
       <button class="btn btn-ghost" @click="pickImage">重新选图</button>
+      <ShareButton :get-files="resultFiles" variant="outline" />
       <button class="btn btn-primary" @click="saveResult">保存图片</button>
     </div>
 
-    <input ref="fileInput" type="file" accept="image/*" style="display: none" @change="handleFileChange" />
+    <input ref="fileInput" type="file" accept="image/*,.heic,.heif" style="display: none" @change="handleFileChange" />
     <svg width="0" height="0" style="position: absolute" aria-hidden="true">
       <defs>
         <linearGradient id="icon-grad" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">

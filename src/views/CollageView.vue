@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted } from 'vue'
 import { useImageDrop } from '../composables/useImageDrop'
-import { loadImageFromFile, downloadCanvas, type LoadedImage } from '../utils/imageLoader'
+import { loadImageFromFile, canvasToFile, downloadCanvas, type LoadedImage } from '../utils/imageLoader'
 import { createCollage } from '../utils/imageCollage'
 import { mergeImages, fitCanvasRatio, type MergeDirection, type CanvasFitMode } from '../utils/imageMerge'
 import { showToast } from '../utils/toast'
 import { fetchSampleFiles } from '../utils/sampleImage'
+import ShareButton from '../components/ShareButton.vue'
 
 const emit = defineEmits<{ back: [] }>()
 const props = defineProps<{ mode?: 'grid' | 'merge' }>()
@@ -212,6 +213,12 @@ function switchMode(m: 'grid' | 'merge') {
   doRender()
 }
 
+async function resultFiles(): Promise<File[]> {
+  if (!resultCanvas.value || images.value.length === 0) return []
+  const base = images.value.length === 1 ? images.value[0].name : mode.value === 'grid' ? '网格拼图' : '长图拼接'
+  return [await canvasToFile(resultCanvas.value, `${base}.png`)]
+}
+
 function saveResult() {
   if (!resultCanvas.value || images.value.length === 0) return
   const base = images.value.length === 1 ? images.value[0].name : mode.value === 'grid' ? '网格拼图' : '长图拼接'
@@ -369,6 +376,7 @@ onUnmounted(() => {
     <!-- 底部操作栏 -->
     <div v-if="images.length > 0" class="bottom-bar">
       <button class="btn btn-ghost" @click="pickImages">继续加图</button>
+      <ShareButton :get-files="resultFiles" variant="outline" />
       <button class="btn btn-primary" @click="saveResult">保存图片</button>
     </div>
 
@@ -376,7 +384,7 @@ onUnmounted(() => {
     <input
       ref="fileInput"
       type="file"
-      accept="image/*"
+      accept="image/*,.heic,.heif"
       multiple
       style="display: none"
       @change="handleFileChange"

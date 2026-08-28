@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { nextTick, onMounted, ref, computed, watch } from 'vue'
 
 /**
  * 前后对比滑条（Before / After 对比）
  * 上层原图通过 clip-path 控制可见宽度，拖动把手即可在原图与结果之间切换。
  * 支持鼠标（pointer 事件）与移动端触摸，兼容触控笔。
  */
-defineProps<{
+const props = defineProps<{
   before: string
   after: string
   beforeLabel?: string
@@ -16,7 +16,23 @@ defineProps<{
 /** 分界线位置（0-100，从左到右） */
 const pos = ref(50)
 const container = ref<HTMLDivElement | null>(null)
+const beforeImg = ref<HTMLImageElement | null>(null)
 const dragging = ref(false)
+
+/**
+ * 容器宽度按图片自身比例算，而不是撑满卡片：
+ * 竖图撑满宽度会高出视口，若改用裁切压高度，主体的头就没了 —— 抠图预览最不能接受的正是这个。
+ */
+const rootStyle = ref<Record<string, string>>({})
+
+function syncRatio() {
+  const img = beforeImg.value
+  if (!img || !img.naturalWidth || !img.naturalHeight) return
+  rootStyle.value = { '--cmp-ratio': String(img.naturalWidth / img.naturalHeight) }
+}
+
+onMounted(syncRatio)
+watch(() => [props.before, props.after], () => nextTick(syncRatio))
 
 /** 上层原图的裁剪范围：左侧保留 pos，右侧裁掉 (100-pos) */
 const beforeStyle = computed(() => ({
@@ -52,6 +68,7 @@ function onPointerUp() {
     ref="container"
     class="compare-slider"
     :class="{ dragging }"
+    :style="rootStyle"
     @pointerdown="onPointerDown"
     @pointermove="onPointerMove"
     @pointerup="onPointerUp"
@@ -60,7 +77,15 @@ function onPointerUp() {
     <!-- 底层：结果图（铺满原图区域，保持比例完整展示） -->
     <img class="cmp-img cmp-after" :src="after" :alt="afterLabel || '结果图'" draggable="false" />
     <!-- 上层：原图（clip-path 控制从左到右露出） -->
-    <img class="cmp-img cmp-before" :src="before" :alt="beforeLabel || '原图'" draggable="false" :style="beforeStyle" />
+    <img
+      ref="beforeImg"
+      class="cmp-img cmp-before"
+      :src="before"
+      :alt="beforeLabel || '原图'"
+      draggable="false"
+      :style="beforeStyle"
+      @load="syncRatio"
+    />
 
     <!-- 分界线 + 拖动把手 -->
     <div class="cmp-divider" :style="{ left: pos + '%' }">
@@ -82,6 +107,8 @@ function onPointerUp() {
 <style scoped>
 .compare-slider {
   position: relative;
+  width: min(100%, calc(var(--cmp-ratio, 1) * 62vh));
+  margin: 0 auto;
   user-select: none;
   -webkit-user-select: none;
   touch-action: none;

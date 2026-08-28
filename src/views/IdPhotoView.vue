@@ -5,15 +5,18 @@ import {
   loadImageFromFile,
   fileToDataUrl,
   canvasToBlob,
+  canvasToFile,
   downloadBlob,
   type LoadedImage,
 } from '../utils/imageLoader'
-import { removeImageBackground, composeBackground, composeBackgroundImage, type RemoveBgProgress } from '../utils/removeBg'
+import { removeImageBackground, composeBackground, composeBackgroundImage } from '../utils/removeBg'
+import { useAiJob } from '../utils/aiJob'
 import { prepareAiModel } from '../utils/aiModel'
 import { ID_PHOTO_SPECS, fitToSpec, layoutOnSheet } from '../utils/idPhoto'
 import { showToast } from '../utils/toast'
 import { fetchSampleFile } from '../utils/sampleImage'
 import CompareSlider from '../components/CompareSlider.vue'
+import ShareButton from '../components/ShareButton.vue'
 
 const emit = defineEmits<{ back: []; consumed: [] }>()
 
@@ -29,7 +32,8 @@ const source = ref<LoadedImage | null>(null)
 const sourceFileRef = ref<File | null>(null)
 const sourceUrl = ref('')
 const processing = ref(false)
-const progress = ref<RemoveBgProgress>({ percent: 0, stage: '' })
+const job = useAiJob<Blob>('idPhoto')
+const progress = computed(() => ({ percent: job.percent, stage: job.stage }))
 const resultBlob = ref<Blob | null>(null)
 const resultUrl = ref('')
 const resultReady = ref(false)
@@ -152,26 +156,45 @@ async function loadSample() {
   }
 }
 
-// 接收其他工具流转过来的图片（如图片编辑 → 证件照）
+// 接收其他工具流转过来的图片（如图片编辑 → 证件照）；
+// 没有新图时先看共享任务：切去别的工具再回来，进度和结果都还在
 onMounted(() => {
   if (props.incomingFile) {
     processFile(props.incomingFile).catch((error) => {
       showToast(error instanceof Error ? error.message : '图片加载失败', 'error')
     })
     emit('consumed')
+    return
   }
+  const file = job.input
+  if (file && job.status !== 'idle') restoreJob(file).catch(() => showToast('图片加载失败', 'error'))
 })
+
+/** 用共享任务里记住的那张图恢复界面，再接回同一次抠图 */
+async function restoreJob(file: File) {
+  sourceFileRef.value = file
+  source.value = await loadImageFromFile(file)
+  refreshSourceUrl()
+  if (job.status === 'error') {
+    showToast(job.error || '上次处理失败，点「开始处理」重试', 'error')
+    return
+  }
+  await startRemove()
+}
 
 async function startRemove() {
   if (!source.value || processing.value) return
   processing.value = true
   resultReady.value = false
   try {
-    const dataUrl = await fileToDataUrl(await sourceFile())
-    // 模型准备与 AI 抠图共用同一份共享状态与缓存，不重复下载
-    await prepareAiModel()
-    const blob = await removeImageBackground(dataUrl, (p) => {
-      progress.value = p
+    const file = await sourceFile()
+    // 任务本体交给共享登记表：视图卸载也不影响它跑完
+    const blob = await job.run(file, async (report) => {
+      const dataUrl = await fileToDataUrl(file)
+      // 模型准备与 AI 抠图共用同一份共享状态与缓存，不重复下载
+      await prepareAiModel()
+      report(1)
+      return removeImageBackground(dataUrl, (p) => report(p.percent, p.stage))
     })
     resultBlob.value = blob
     await applyBgColor()
@@ -290,22 +313,31 @@ function clearBgImage() {
   if (resultBlob.value) applyBgColor()
 }
 
+/** 导出最终证件照文件：有底色/背景图用 JPEG（体积更小），透明底用 PNG 保留通道 */
+async function buildResultFile(): Promise<File | null> {
+  if (!source.value || !resultBlob.value) return null
+  const canvas = await buildResultCanvas()
+  const label = bgImageEl ? '背景图' : (BG_COLORS.find((c) => c.value === bgColor.value)?.label ?? '')
+  const specLabel = currentSpec.value ? `_${currentSpec.value.label}` : ''
+  const base = `${source.value.name}_证件照${specLabel}${label}`
+  const opaque = bgColor.value !== null || !!bgImageEl
+  // 有底色/背景图（无透明通道）：JPEG 体积更小，适合证件照场景
+  // 透明底：JPEG 不支持透明通道，必须用 PNG 保留
+  return opaque
+    ? canvasToFile(canvas, `${base}.jpg`, 'image/jpeg', 0.95)
+    : canvasToFile(canvas, `${base}.png`, 'image/png')
+}
+
+async function resultFiles(): Promise<File[]> {
+  const file = await buildResultFile()
+  return file ? [file] : []
+}
+
 async function saveResult() {
-  if (!source.value || !resultBlob.value) return
   try {
-    const canvas = await buildResultCanvas()
-    const label = bgImageEl ? '背景图' : (BG_COLORS.find((c) => c.value === bgColor.value)?.label ?? '')
-    const specLabel = currentSpec.value ? `_${currentSpec.value.label}` : ''
-    const opaque = bgColor.value !== null || !!bgImageEl
-    if (opaque) {
-      // 有底色/背景图（无透明通道）：JPEG 体积更小，适合证件照场景
-      const blob = await canvasToBlob(canvas, 'image/jpeg', 0.95)
-      downloadBlob(blob, `${source.value.name}_证件照${specLabel}${label}.jpg`)
-    } else {
-      // 透明底：JPEG 不支持透明通道，必须用 PNG 保留
-      const blob = await canvasToBlob(canvas, 'image/png')
-      downloadBlob(blob, `${source.value.name}_证件照${specLabel}${label}.png`)
-    }
+    const file = await buildResultFile()
+    if (!file) return
+    downloadBlob(file, file.name)
     showToast('已开始下载', 'success')
   } catch (error) {
     showToast(error instanceof Error ? error.message : '保存失败', 'error')
@@ -475,13 +507,14 @@ onUnmounted(() => {
           </p>
         </div>
 
-        <p v-if="processing" class="tip-text">AI 识别中，请勿关闭页面…</p>
+        <p v-if="processing" class="tip-text">全程本地处理，切去别的工具也不会打断，回来接着看。</p>
       </template>
     </div>
 
     <!-- 底部操作栏 -->
     <div v-if="source" class="bottom-bar">
       <button class="btn btn-ghost" @click="pickImage">重新选图</button>
+      <ShareButton v-if="resultReady" :get-files="resultFiles" variant="outline" />
       <button v-if="!resultReady" class="btn btn-primary" :disabled="processing" @click="startRemove">
         {{ processing ? '处理中…' : '开始处理' }}
       </button>
@@ -492,14 +525,14 @@ onUnmounted(() => {
     <input
       ref="fileInput"
       type="file"
-      accept="image/*"
+      accept="image/*,.heic,.heif"
       style="display: none"
       @change="handleFileChange"
     />
     <input
       ref="bgFileInput"
       type="file"
-      accept="image/*"
+      accept="image/*,.heic,.heif"
       style="display: none"
       @change="chooseBgImage"
     />

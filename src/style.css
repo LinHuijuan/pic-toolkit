@@ -579,30 +579,9 @@ input[type='range']::-moz-range-track {
   line-height: 1.6;
 }
 
-/* 双栏对比 */
+/* 前后对比：整块占满卡片，内部尺寸由 CompareSlider 自己按图片比例决定 */
 .compare-wrap {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-}
-
-.compare-item {
-  text-align: center;
-}
-
-.compare-item .compare-label {
-  font-size: 13px;
-  color: var(--text-sub);
-  margin-bottom: 6px;
-}
-
-.compare-item .preview-wrap {
-  height: 200px;
-}
-
-.compare-item .preview-wrap img,
-.compare-item .preview-wrap canvas {
-  max-height: 200px;
+  width: 100%;
 }
 
 /* ===== PC 宽屏适配（≥768px）：放宽限宽、双栏布局、加大控件 ===== */
@@ -637,16 +616,6 @@ input[type='range']::-moz-range-track {
   .preview-wrap img,
   .preview-wrap canvas {
     max-height: 62vh;
-  }
-
-  .compare-item .preview-wrap {
-    height: auto;
-    min-height: 260px;
-  }
-
-  .compare-item .preview-wrap img,
-  .compare-item .preview-wrap canvas {
-    max-height: 56vh;
   }
 
   .seg-control .seg-item {
