@@ -231,7 +231,7 @@ onUnmounted(() => {
       <div class="page-title">九宫格切图</div>
     </div>
 
-    <div class="page-content">
+    <div class="page-content tool-page">
       <!-- 未选图状态 -->
       <div v-if="!source" class="empty-state">
         <div class="empty-icon" v-html="EMPTY_ICON"></div>
@@ -515,13 +515,12 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
-/* PC 宽屏：切分设置左栏，原图 + 结果右栏双栏布局 */
+/* PC 宽屏：双栏尺寸走 .tool-page 默认规则，这里覆盖比例并重排落位——
+   切分设置独占左栏，原图与切分结果在右栏上下叠放 */
 @media (min-width: 768px) {
-  .page-content {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr);
-    gap: 20px;
-    align-items: start;
+  .page-content.tool-page {
+    --pane-left: 1fr;
+    --pane-right: 1.3fr;
   }
 
   .page-content .card:nth-child(1) {

@@ -246,7 +246,7 @@ onUnmounted(() => {
       <div class="page-title">拼图</div>
     </div>
 
-    <div class="page-content">
+    <div class="page-content tool-page">
       <!-- 未选图状态 -->
       <div v-if="images.length === 0" class="empty-state">
         <div class="empty-icon" v-html="EMPTY_ICON"></div>
@@ -526,13 +526,12 @@ onUnmounted(() => {
   color: var(--danger);
 }
 
-/* PC 宽屏：设置区 + 图片列表左栏，拼图预览右栏；列表行 hover 抬升 */
+/* PC 宽屏：双栏尺寸走 .tool-page 默认规则，这里覆盖比例并自定义落位——
+   设置与图片列表在左栏上下叠放，拼图预览独占右栏 */
 @media (min-width: 768px) {
-  .page-content {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
-    gap: 20px;
-    align-items: start;
+  .page-content.tool-page {
+    --pane-left: 1fr;
+    --pane-right: 1.2fr;
   }
 
   .page-content .card:nth-child(1) {

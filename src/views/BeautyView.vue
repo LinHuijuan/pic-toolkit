@@ -154,7 +154,7 @@ onUnmounted(() => {
       <div class="page-title">美颜修图</div>
     </div>
 
-    <div class="page-content">
+    <div class="page-content tool-page">
       <div v-if="!source" class="empty-state">
         <div class="empty-icon" v-html="EMPTY_ICON"></div>
         <div>选择一张人像，AI 本地检测人脸并磨皮提亮</div>
@@ -267,23 +267,10 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
-/* 桌面：预览在左、参数在右，与其他工具页的双栏结构保持一致 */
+/* 桌面：双栏结构与落位走 style.css 的 .tool-page 默认规则，这里只调左右比例 */
 @media (min-width: 768px) {
-  .page-content {
-    display: grid;
-    grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
-    gap: 20px;
-    align-items: start;
-  }
-
-  .page-content .card:nth-child(1) {
-    grid-column: 1;
-    grid-row: 1;
-  }
-
-  .page-content .card:nth-child(2) {
-    grid-column: 2;
-    grid-row: 1;
+  .page-content.tool-page {
+    --pane-left: 1.25fr;
   }
 }
 </style>

@@ -224,7 +224,7 @@ function fallbackDataUrl(source: LoadedImage): string {
       <div class="page-title">图片格式转换</div>
     </div>
 
-    <div class="page-content">
+    <div class="page-content tool-page">
       <!-- 未选图状态 -->
       <div v-if="items.length === 0" class="empty-state">
         <div class="empty-icon" v-html="EMPTY_ICON"></div>
@@ -447,23 +447,11 @@ function fallbackDataUrl(source: LoadedImage): string {
   transform: scale(0.94);
 }
 
-/* PC 宽屏：设置左栏 + 结果右栏双栏布局；结果项 hover 抬升 */
+/* PC 宽屏：双栏落位走 .tool-page 默认规则；这一页结果列更宽，所以左窄右宽。列表行 hover 抬升 */
 @media (min-width: 768px) {
-  .page-content {
-    display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
-    gap: 20px;
-    align-items: start;
-  }
-
-  .page-content .card:nth-child(1) {
-    grid-column: 1;
-    grid-row: 1;
-  }
-
-  .page-content .card:nth-child(2) {
-    grid-column: 2;
-    grid-row: 1;
+  .page-content.tool-page {
+    --pane-left: 2fr;
+    --pane-right: 3fr;
   }
 
   .item-row {

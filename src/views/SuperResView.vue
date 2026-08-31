@@ -161,7 +161,7 @@ onUnmounted(() => {
       <div class="page-title">超分辨率</div>
     </div>
 
-    <div class="page-content">
+    <div class="page-content tool-page">
       <div v-if="!source" class="empty-state">
         <div class="empty-icon" v-html="EMPTY_ICON"></div>
         <div>选一张小图（长边 {{ MAX_INPUT_EDGE }}px 内），本地放大 4 倍</div>
@@ -178,7 +178,7 @@ onUnmounted(() => {
           <div class="preview-wrap">
             <!-- 处理中显示进度占位 -->
             <div v-if="processing" class="upscale-loading">
-              <div class="progress-track"><div class="progress-fill" :style="{ width: progress + '%' }"></div></div>
+              <div class="progress-bar"><div class="progress-inner" :style="{ width: progress + '%' }"></div></div>
               <p class="tip-text">
                 AI 正在本地放大… {{ progress }}%（已用 {{ formatDuration(elapsedMs) }}<template v-if="remainingMs !== null">
                   ，约再 {{ formatDuration(remainingMs) }}</template
@@ -263,22 +263,10 @@ onUnmounted(() => {
   background: var(--bg-page);
 }
 
-.progress-track {
-  height: 8px;
-  border-radius: 999px;
-  background: rgba(56, 189, 248, 0.12);
-  overflow: hidden;
-}
-
-.progress-fill {
-  height: 100%;
-  border-radius: 999px;
-  background: var(--gradient);
-  transition: width 0.25s ease;
-}
-
 .upscale-loading,
 .upscale-wait {
+  /* .preview-wrap 是居中弹性容器，不给宽度的话这里会按内容塌成一条窄列 */
+  width: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;

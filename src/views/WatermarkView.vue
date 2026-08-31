@@ -528,7 +528,7 @@ onUnmounted(() => {
       <div class="page-title">添加水印</div>
     </div>
 
-    <div class="page-content">
+    <div class="page-content tool-page">
       <!-- 未选图状态 -->
       <div v-if="!source" class="empty-state">
         <div class="empty-icon" v-html="EMPTY_ICON"></div>
@@ -843,27 +843,10 @@ onUnmounted(() => {
   line-height: 0;
 }
 
-/* PC 宽屏：预览左栏 + 设置右栏双栏布局 */
+/* PC 宽屏：双栏落位走 style.css 的 .tool-page 默认规则，这里只调左右比例 */
 @media (min-width: 768px) {
-  .page-content {
-    display: grid;
-    grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
-    gap: 20px;
-    align-items: start;
-  }
-
-  .page-content .card:nth-child(1) {
-    grid-column: 1;
-    grid-row: 1;
-  }
-
-  .page-content .card:nth-child(2) {
-    grid-column: 2;
-    grid-row: 1;
-  }
-
-  .page-content .tip-text {
-    grid-column: 1 / -1;
+  .page-content.tool-page {
+    --pane-left: 1.05fr;
   }
 }
 

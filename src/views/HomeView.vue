@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { prepareAiModel, aiModel } from '../utils/aiModel'
 import { formatDuration } from '../utils/format'
 
@@ -31,6 +32,17 @@ function startPreload() {
   // 失败原因已写入共享状态，这里只需避免未处理的 rejection
   prepareAiModel().catch(() => {})
 }
+
+/** 一行内说清"要不要等、下完了吗、还要多久"；文案过长时靠省略号收尾 */
+const aiStatusText = computed(() => {
+  const m = aiModel
+  if (m.stage === 'idle') return '抠图、证件照用到 42MB AI 模型，下一次离线可用'
+  if (m.stage === 'ready') return 'AI 模型已就绪，抠图与证件照打开即用'
+  if (m.stage === 'error') return m.message || '模型下载失败，可重试或进工具页再试'
+  const size = m.totalMB > 0 ? `${m.loadedMB.toFixed(1)}/${m.totalMB.toFixed(1)}MB` : `${m.loadedMB.toFixed(1)}MB`
+  const remain = m.remainingSeconds != null ? ` · 约再 ${formatDuration(m.remainingSeconds * 1000)}` : ''
+  return `${m.message} ${m.percent}% · ${size}${remain}`
+})
 
 interface ToolCard {
   key: ToolKey
@@ -170,7 +182,8 @@ function iconSvg(item: ToolCard): string {
 
 <template>
   <div class="page-content home-page">
-    <!-- 品牌渐变头部（hero）：logo 承担品牌识别，主标题位置让给结果导向的那句话 -->
+    <!-- 品牌渐变头部（hero）：logo 承担品牌识别，主标题位置让给结果导向的那句话。
+         隐私承诺与 AI 模型状态都收在这一屏里，首屏要留给工具卡片 -->
     <div class="home-header">
       <div class="home-logo">
         <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -180,49 +193,18 @@ function iconSvg(item: ToolCard): string {
         </svg>
       </div>
       <h1 class="home-title">图片不用上传，就能抠图、换底色、切九宫格</h1>
-      <p class="home-subtitle">图片工具箱 · 12 个工具在你这台设备里跑完，不注册、打开即用</p>
-    </div>
+      <p class="home-subtitle">12 个工具在你这台设备里跑完 · 不注册、不上传、打开即用</p>
 
-    <!-- 隐私承诺 -->
-    <div class="privacy-banner">
-      <span class="privacy-icon">🔒</span>
-      <span>全部图片在本机处理，绝不上传服务器</span>
-    </div>
-
-    <!-- AI 模型预下载 -->
-    <div class="ai-model-card">
-      <div class="ai-model-top">
-        <div class="ai-model-badge">⚡</div>
-        <div>
-          <div class="ai-model-title">AI 模型</div>
-          <div class="ai-model-desc">抠图与证件照需要 42MB 模型，仅下载一次，之后离线可用</div>
+      <div class="hero-status" :class="'hero-status--' + aiModel.stage">
+        <span class="hero-status-icon">{{ aiModel.stage === 'ready' ? '✓' : aiModel.stage === 'error' ? '!' : '⚡' }}</span>
+        <span class="hero-status-text">{{ aiStatusText }}</span>
+        <button v-if="aiModel.stage === 'idle' || aiModel.stage === 'error'" class="hero-status-action" @click="startPreload">
+          {{ aiModel.stage === 'error' ? '重试' : '预下载' }}
+        </button>
+        <div v-if="aiModel.stage === 'downloading' || aiModel.stage === 'warming'" class="progress-bar is-mini hero-status-bar">
+          <div class="progress-inner" :style="{ width: aiModel.percent + '%' }"></div>
         </div>
       </div>
-
-      <template v-if="aiModel.stage === 'idle'">
-        <button class="btn btn-primary" style="width: 100%" @click="startPreload">预下载模型</button>
-      </template>
-      <template v-else-if="aiModel.stage === 'downloading' || aiModel.stage === 'warming'">
-        <div class="progress-track">
-          <div class="progress-fill" :style="{ width: aiModel.percent + '%' }"></div>
-        </div>
-        <div class="ai-model-meta">
-          <span>{{ aiModel.message }}</span>
-          <span v-if="aiModel.totalMB > 0">{{ aiModel.loadedMB.toFixed(1) }} / {{ aiModel.totalMB.toFixed(1) }} MB</span>
-          <span v-else>{{ aiModel.loadedMB.toFixed(1) }} MB</span>
-        </div>
-        <div class="ai-model-meta sub">
-          <span>已用 {{ formatDuration(aiModel.elapsedMs) }}</span>
-          <span v-if="aiModel.remainingSeconds != null">预计剩余 {{ formatDuration(aiModel.remainingSeconds * 1000) }}</span>
-        </div>
-      </template>
-      <template v-else-if="aiModel.stage === 'ready'">
-        <div class="ai-model-ready">模型已就绪 ✓</div>
-      </template>
-      <template v-else-if="aiModel.stage === 'error'">
-        <div class="ai-model-error">{{ aiModel.message }}</div>
-        <button class="btn btn-outline" style="width: 100%" @click="startPreload">重试</button>
-      </template>
     </div>
 
     <!-- 入口分两层：先用整行大卡给出三个"最值得试"的，其余按意图分组 -->
@@ -328,7 +310,7 @@ function iconSvg(item: ToolCard): string {
 /* 品牌渐变头部 */
 .home-header {
   text-align: center;
-  padding: 24px 20px 26px;
+  padding: 18px;
   background: var(--gradient);
   border-radius: 22px;
   box-shadow: 0 10px 30px rgba(79, 110, 247, 0.28);
@@ -374,10 +356,10 @@ function iconSvg(item: ToolCard): string {
 }
 
 .home-logo {
-  width: 64px;
-  height: 64px;
-  margin: 0 auto 10px;
-  border-radius: 18px;
+  width: 52px;
+  height: 52px;
+  margin: 0 auto 6px;
+  border-radius: 15px;
   background: rgba(255, 255, 255, 0.18);
   backdrop-filter: blur(6px);
   display: flex;
@@ -388,12 +370,12 @@ function iconSvg(item: ToolCard): string {
 }
 
 .home-logo svg {
-  width: 34px;
-  height: 34px;
+  width: 28px;
+  height: 28px;
 }
 
 .home-title {
-  margin-top: 12px;
+  margin-top: 10px;
   font-size: 21px;
   line-height: 1.35;
   font-weight: 700;
@@ -404,26 +386,77 @@ function iconSvg(item: ToolCard): string {
 }
 
 .home-subtitle {
-  margin-top: 8px;
+  margin-top: 6px;
   font-size: 13px;
   color: rgba(255, 255, 255, 0.85);
   position: relative;
   z-index: 1;
 }
 
-/* 隐私承诺 */
-.privacy-banner {
+/* AI 模型状态：压在 hero 底部的一行胶囊，避免单独占一整张卡的高度 */
+.hero-status {
+  position: relative;
+  z-index: 1;
+  margin-top: 12px;
   display: flex;
   align-items: center;
-  justify-content: center;
   gap: 8px;
-  padding: 12px;
-  border-radius: 14px;
-  background: linear-gradient(135deg, rgba(16, 185, 129, 0.1) 0%, rgba(79, 110, 247, 0.08) 100%);
-  border: 1px solid rgba(16, 185, 129, 0.15);
-  color: #059669;
-  font-size: 13px;
-  font-weight: 500;
+  padding: 7px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  font-size: 12px;
+  color: #fff;
+  text-align: left;
+  overflow: hidden;
+}
+
+.hero-status-icon {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  font-weight: 700;
+}
+
+.hero-status--ready .hero-status-icon {
+  color: #bbf7d0;
+}
+
+.hero-status--error {
+  background: rgba(239, 68, 68, 0.22);
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.hero-status-text {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.hero-status-action {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.hero-status-action:active {
+  transform: scale(0.96);
+}
+
+/* 进度线贴在胶囊底边，不再单独占一行 */
+.hero-status-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
 }
 
 /* 分组标题 */
@@ -649,91 +682,5 @@ function iconSvg(item: ToolCard): string {
 
 .footer-tip {
   text-align: center;
-}
-
-/* 首页「预下载 AI 模型」卡片 */
-.ai-model-card {
-  background: rgba(255, 255, 255, 0.92);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.9);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-card);
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.ai-model-top {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.ai-model-badge {
-  width: 46px;
-  height: 46px;
-  border-radius: 14px;
-  background: linear-gradient(135deg, #fcd34d, #f59e0b);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 22px;
-  flex-shrink: 0;
-}
-
-.ai-model-title {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--text-main);
-}
-
-.ai-model-desc {
-  margin-top: 2px;
-  font-size: 12px;
-  color: var(--text-sub);
-}
-
-.progress-track {
-  height: 8px;
-  border-radius: 999px;
-  background: rgba(79, 110, 247, 0.12);
-  overflow: hidden;
-}
-
-.progress-fill {
-  height: 100%;
-  border-radius: 999px;
-  background: var(--gradient);
-  transition: width 0.25s ease;
-}
-
-.ai-model-meta {
-  display: flex;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-sub);
-}
-
-/* 已用时长 / 预计剩余：比上一行再弱一档，这才能分出层次 */
-.ai-model-meta.sub {
-  color: var(--text-tertiary);
-}
-
-.ai-model-ready {
-  text-align: center;
-  padding: 6px 0;
-  font-size: 14px;
-  font-weight: 600;
-  color: #059669;
-}
-
-.ai-model-error {
-  text-align: center;
-  font-size: 13px;
-  color: var(--danger);
 }
 </style>
