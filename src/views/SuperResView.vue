@@ -212,7 +212,7 @@ onUnmounted(() => {
 
     <div v-if="source" class="bottom-bar">
       <button class="btn btn-ghost" @click="pickImage">重新选图</button>
-      <ShareButton :get-files="resultFiles" variant="outline" :disabled="!resultUrl || processing" label="分享放大图" />
+      <ShareButton :get-files="resultFiles" variant="outline" :disabled="!resultUrl || processing" />
       <button class="btn btn-primary" :disabled="!resultUrl || processing" @click="saveResult">
         保存超分图{{ outputInfo ? `（x${outputInfo.ratio}）` : '' }}
       </button>
@@ -265,8 +265,6 @@ onUnmounted(() => {
 
 .upscale-loading,
 .upscale-wait {
-  /* .preview-wrap 是居中弹性容器，不给宽度的话这里会按内容塌成一条窄列 */
-  width: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;

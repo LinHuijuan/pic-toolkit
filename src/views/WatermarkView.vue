@@ -568,6 +568,16 @@ onUnmounted(() => {
               >{{ text }}</div>
             </div>
           </div>
+          <!-- 撤销/重做作用在预览结果上，摆在预览下面而不是底栏：底栏窄屏装不下 6 项 -->
+          <div class="form-row">
+            <span class="label">叠加历史</span>
+            <div style="display: flex; gap: 8px; flex: 1; justify-content: flex-end">
+              <button class="btn btn-outline btn-sm" :disabled="resultIndex <= 0" @click="undo">撤销</button>
+              <button class="btn btn-outline btn-sm" :disabled="resultIndex >= resultStack.length - 1" @click="redo">
+                重做
+              </button>
+            </div>
+          </div>
         </div>
 
         <!-- 水印设置 -->
@@ -728,8 +738,6 @@ onUnmounted(() => {
     <!-- 底部操作栏 -->
     <div v-if="source" class="bottom-bar">
       <button class="btn btn-ghost" @click="pickImage">重新选图</button>
-      <button class="btn btn-ghost" :disabled="resultIndex <= 0" @click="undo">撤销</button>
-      <button class="btn btn-ghost" :disabled="resultIndex >= resultStack.length - 1" @click="redo">重做</button>
       <button class="btn btn-outline" @click="handleReplace">继续叠加</button>
       <ShareButton :get-files="resultFiles" variant="outline" />
       <button class="btn btn-primary" @click="saveResult">保存图片</button>

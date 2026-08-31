@@ -16,8 +16,10 @@
   --gradient: linear-gradient(135deg, #4f6ef7 0%, #8b5cf6 100%);
   --gradient-soft: linear-gradient(135deg, rgba(79, 110, 247, 0.1) 0%, rgba(139, 92, 246, 0.12) 100%);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
-  /* 底部 sticky 操作栏实测高度（含 padding，不含 safe-area）：移动端 72px */
-  --bottom-bar-h: 72px;
+  /* 底部 sticky 操作栏的真实高度：由 utils/bottomBar.ts 用 ResizeObserver 写回。
+     底栏有几颗按钮、系统字号开多大都会改变它，写死一个数会让 toast 钻到栏底下。
+     0px 是没有底栏的页面（首页）的取值。 */
+  --bottom-bar-h: 0px;
 }
 
 * {
@@ -136,11 +138,18 @@ body {
 }
 
 .top-bar .page-title {
+  /* 绝对居中：flex 里标题只能靠 margin-right 猜返回按钮的宽度，按钮尺寸一改就歪。
+     .top-bar 是 sticky，本身已经是定位上下文。 */
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100% - 104px);
   font-size: 17px;
   font-weight: 600;
-  flex: 1;
   text-align: center;
-  margin-right: 36px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* 页面内容区 */
@@ -265,6 +274,13 @@ body {
   pointer-events: none;
 }
 
+/* 小一号按钮：4 个视图共用同一个类名，所以必须定义在全局。
+   以前只有两个视图各自 scoped 了一份，另两个视图用了却没人定义。 */
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
 /* 底部固定操作栏（毛玻璃） */
 .bottom-bar {
   position: sticky;
@@ -276,11 +292,17 @@ body {
   -webkit-backdrop-filter: blur(16px);
   border-top: 1px solid rgba(232, 235, 243, 0.8);
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
+/* basis 0 + 不换行：等分可用宽度，只有文字真的排不下时才整颗按钮换到第二行
+   （min-width: auto 兜住了标签本身的最小宽度，所以按钮不会被压扁）。
+   原来的 flex: 1 配 basis 0 行为一样，但当时没有 nowrap，16px 中文会在 61px 的
+   盒子里折成两行，把栏高从 74px 撑到 95px。 */
 .bottom-bar .btn {
-  flex: 1;
+  flex: 1 1 0;
+  white-space: nowrap;
 }
 
 /* 图片预览容器 */
@@ -311,6 +333,13 @@ body {
   max-width: 100%;
   max-height: 46vh;
   display: block;
+}
+
+/* .preview-wrap 是居中弹性容器：不给宽度的非图片子项会按内容塌成一条窄列
+   （超分的进度条就曾塌成 0 宽）。三类可拖拽舞台是例外——它们必须贴着图片轮廓
+   收缩，叠加的水印和裁切框才能按百分比对齐图片本身。 */
+.preview-wrap > :not(img):not(canvas):not(.wm-stage):not(.edit-stage):not(.focus-stage) {
+  width: 100%;
 }
 
 /* 分段控制（行/列数量） */
@@ -387,7 +416,7 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 0;
+  padding: 8px 0;
 }
 
 .range-row .range-val {
@@ -402,15 +431,25 @@ input[type='range'] {
   flex: 1;
   -webkit-appearance: none;
   appearance: none;
+  /* 元素盒 28px 只当命中区用：可见轨道是下面那层 6px 的伪元素，
+     命中区只有 6px 的话触屏上得精准戳中那条窄带才能起拖。 */
+  height: 28px;
+  background: transparent;
+  outline: none;
+  cursor: pointer;
+}
+
+input[type='range']::-webkit-slider-runnable-track {
   height: 6px;
   border-radius: 3px;
   background: linear-gradient(90deg, rgba(79, 110, 247, 0.35) 0%, rgba(139, 92, 246, 0.35) 100%);
-  outline: none;
 }
 
 input[type='range']::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
+  /* 轨道只有 6px，thumb 22px 要自己抬回中间：(22 - 6) / 2 */
+  margin-top: -8px;
   width: 22px;
   height: 22px;
   border-radius: 50%;
@@ -463,6 +502,41 @@ input[type='range']::-moz-range-track {
   .color-dot:active {
     transform: scale(0.96);
   }
+
+  /* 实测偏小的控件补到 44px 可点面积。只用 min-height 和透明热区，
+     不改 padding 与字号，所以视觉尺寸和整页排版节奏保持原样；桌面端不进这个分支。 */
+  .btn-sm,
+  .item-save-btn {
+    min-height: 44px;
+  }
+
+  /* 返回按钮外观仍是 36px 圆，向外扩 8px 透明热区 */
+  .top-bar .back-btn {
+    position: relative;
+  }
+
+  .top-bar .back-btn::after {
+    content: '';
+    position: absolute;
+    inset: -8px;
+  }
+
+  .seg-control .seg-item {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+  }
+
+  .color-dot {
+    width: 38px;
+    height: 38px;
+  }
+
+  /* 滑块命中区再高一档：轨道仍然是那 6px 伪元素 */
+  input[type='range'] {
+    height: 36px;
+  }
 }
 
 /* 空状态（未选图） */
@@ -471,38 +545,45 @@ input[type='range']::-moz-range-track {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 48px 0;
+  padding: 32px 0;
   color: var(--text-sub);
   font-size: 14px;
   gap: 14px;
 }
 
 .empty-state .empty-icon {
-  width: 92px;
-  height: 92px;
-  border-radius: 30px;
+  width: 76px;
+  height: 76px;
+  border-radius: 26px;
   background: var(--gradient-soft);
   border: 1px solid rgba(255, 255, 255, 0.9);
   box-shadow: var(--shadow-card);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 44px;
-  margin-bottom: 4px;
+  font-size: 38px;
+  margin-bottom: 2px;
 }
 
 /* 渐变 SVG 空状态图标（与首页功能卡片风格统一） */
 .empty-state .empty-icon svg {
-  width: 46px;
-  height: 46px;
+  width: 40px;
+  height: 40px;
 }
 
-/* 空状态操作区：选择图片 + 体验示例图 */
+/* 空状态操作区：选图与示例图是同一件事的两个入口，并排摆比竖着排少一步错觉 */
 .empty-actions {
   display: flex;
-  flex-direction: column;
-  align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
   gap: 10px;
+  width: 100%;
+}
+
+.empty-actions .btn {
+  /* flex-basis 优先于 width，视图里残留的行内 width: 180px 不会挡住并排布局 */
+  flex: 1 1 140px;
+  max-width: 220px;
 }
 
 .btn-sample {
@@ -636,11 +717,6 @@ input[type='range']::-moz-range-track {
     /* 各工具页的双栏网格是按这个宽度调的：拉满屏宽会让预览列与参数列同时失衡 */
     max-width: 1200px;
     margin-inline: auto;
-  }
-
-  /* 桌面端按钮更高，操作栏实测 78px：toast 偏移跟着真实高度走 */
-  :root {
-    --bottom-bar-h: 78px;
   }
 
   .page-content {

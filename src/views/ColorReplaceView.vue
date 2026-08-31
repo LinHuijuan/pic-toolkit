@@ -599,11 +599,6 @@ onUnmounted(() => {
 .crop-handle.sw { left: -8px; bottom: -8px; cursor: nesw-resize; }
 .crop-handle.se { right: -8px; bottom: -8px; cursor: nwse-resize; }
 
-.btn-sm {
-  padding: 6px 12px;
-  font-size: 13px;
-}
-
 .form-row .swatch {
   position: relative;
   width: 30px;

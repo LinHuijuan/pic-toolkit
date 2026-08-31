@@ -704,6 +704,13 @@ onUnmounted(() => {
               ✨ AI 智能裁剪
             </button>
           </div>
+          <div class="form-row">
+            <span class="label">格式</span>
+            <div class="format-switch">
+              <div class="fmt-item" :class="{ active: saveFormat === 'png' }" @click="saveFormat = 'png'">PNG</div>
+              <div class="fmt-item" :class="{ active: saveFormat === 'jpg' }" @click="saveFormat = 'jpg'">JPG</div>
+            </div>
+          </div>
           <p class="tip-text">
             拖动裁切框移动位置，拖四角手柄调整大小{{ currentRatio ? '（保持当前比例）' : '' }}。裁剪后可直接保存或继续使用其他工具。
           </p>
@@ -729,10 +736,6 @@ onUnmounted(() => {
 
     <!-- 底部操作栏 -->
     <div v-if="source" class="bottom-bar">
-      <div class="format-switch">
-        <div class="fmt-item" :class="{ active: saveFormat === 'png' }" @click="saveFormat = 'png'">PNG</div>
-        <div class="fmt-item" :class="{ active: saveFormat === 'jpg' }" @click="saveFormat = 'jpg'">JPG</div>
-      </div>
       <button class="btn btn-ghost" @click="pickImage">重新选图</button>
       <button class="btn btn-outline" @click="showNextTools = !showNextTools">继续处理</button>
       <ShareButton :get-files="resultFiles" variant="outline" />
@@ -841,12 +844,7 @@ onUnmounted(() => {
   cursor: nwse-resize;
 }
 
-.btn-sm {
-  padding: 6px 12px;
-  font-size: 13px;
-}
-
-/* 底部格式切换（PNG / JPG） */
+/* 导出格式切换（PNG / JPG） */
 .format-switch {
   display: flex;
   gap: 4px;

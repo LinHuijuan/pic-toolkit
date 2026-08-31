@@ -601,7 +601,7 @@ function iconSvg(item: ToolCard): string {
   border: 1px solid color-mix(in srgb, var(--card-from) 70%, var(--text-sub));
   border-radius: 999px;
   color: color-mix(in srgb, var(--card-to) 72%, #1f2937);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   line-height: 1.5;
 }

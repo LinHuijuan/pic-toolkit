@@ -2,6 +2,7 @@
 import { ref, watch, computed, defineAsyncComponent, onMounted, onUnmounted } from 'vue'
 import { DROP_EVENT } from './composables/useImageDrop'
 import { aiModel } from './utils/aiModel'
+import { stopTrackingBottomBarHeight, trackBottomBarHeight } from './utils/bottomBar'
 import { formatDuration } from './utils/format'
 import { isImageFile } from './utils/imageLoader'
 
@@ -170,6 +171,7 @@ onMounted(() => {
   window.addEventListener('hashchange', onHashChange)
   // 无 hash 的首次访问归一化为 #/，让首页也有一个可复制分享的稳定地址
   if (!location.hash) location.replace(`${location.pathname}${location.search}#/`)
+  trackBottomBarHeight()
 })
 
 onUnmounted(() => {
@@ -179,6 +181,7 @@ onUnmounted(() => {
   window.removeEventListener('drop', onDrop)
   window.removeEventListener('paste', onPaste)
   window.removeEventListener('hashchange', onHashChange)
+  stopTrackingBottomBarHeight()
 })
 </script>
 

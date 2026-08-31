@@ -3,6 +3,8 @@
  * 系统分享按钮
  * 只在浏览器确实能分享图片时渲染，避免给不支持的环境摆一个点了没反应的按钮。
  * 结果文件由调用方通过 getFiles 现取，因此点击到 navigator.share 之间只应有一次导出计算。
+ *
+ * label 约定：多文件结果传「分享全部」，单文件结果用默认的「分享」，不要再自造文案。
  */
 import { ref } from 'vue'
 import { canShareFiles, shareFiles } from '../utils/share'
