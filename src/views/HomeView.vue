@@ -451,6 +451,24 @@ function iconSvg(item: ToolCard): string {
   transform: scale(0.96);
 }
 
+/* 触屏下把命中区撑到胶囊内高（24 → 38px）。不能用 min-height: 44px：胶囊只有 40px 高、
+   按钮再大也会被 overflow: hidden 裁掉，或者反过来把整条 pill 撑变形。
+   左边只外扩 4px（与文字之间有 8px gap），避免点到状态文字就误触下载。 */
+@media (hover: none) {
+  .hero-status-action {
+    position: relative;
+  }
+
+  .hero-status-action::after {
+    content: '';
+    position: absolute;
+    top: -7px;
+    right: -12px;
+    bottom: -7px;
+    left: -4px;
+  }
+}
+
 /* 进度线贴在胶囊底边，不再单独占一行 */
 .hero-status-bar {
   position: absolute;
