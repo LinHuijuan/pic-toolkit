@@ -39,7 +39,10 @@ body {
   font-family:
     -apple-system, BlinkMacSystemFont, 'PingFang SC', 'HarmonyOS Sans SC',
     'Microsoft YaHei', sans-serif;
-  background: linear-gradient(180deg, #f8f9ff 0%, #eef1fb 100%) fixed;
+  /* 底层渐变 + 极低透明度的颗粒噪点：给纯色渐变一点"纸感"，是整套视觉的签名纹理 */
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='130' height='130'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E") repeat,
+    linear-gradient(180deg, #f8f9ff 0%, #eef1fb 100%) fixed;
   color: var(--text-main);
   font-size: 15px;
   line-height: 1.5;
@@ -326,6 +329,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  /* 结果呈现的内描边：像一层薄相框，把图片结果"托"起来（签名式视觉） */
+  box-shadow: inset 0 0 0 1.5px rgba(79, 110, 247, 0.08);
 }
 
 .preview-wrap img,
@@ -624,7 +629,25 @@ input[type='range']::-moz-range-track {
   height: 100%;
   border-radius: 999px;
   background: var(--gradient);
+  position: relative;
+  overflow: hidden;
   transition: width 0.25s ease;
+}
+
+/* 进度条流光：一层斜向高光缓慢扫过，让等待不那么"死"。
+   全局 prefers-reduced-motion 会把动画时长压到 0.01ms，晕动用户不受影响。 */
+.progress-bar .progress-inner::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 32%, rgba(255, 255, 255, 0.45) 50%, transparent 68%);
+  background-size: 220% 100%;
+  animation: progress-shimmer 1.6s linear infinite;
+}
+
+@keyframes progress-shimmer {
+  from { background-position: 220% 0; }
+  to { background-position: -120% 0; }
 }
 
 /* 细线版：贴在容器底边做进度提示，不额外占一行高度 */

@@ -212,11 +212,11 @@ function iconSvg(item: ToolCard): string {
       <h2 class="group-title">效果最直观的 3 个</h2>
       <div class="featured-list">
         <a
-          v-for="item in featuredTools"
+          v-for="(item, idx) in featuredTools"
           :key="item.key"
           class="feature-card is-featured"
           :href="'#/' + item.key"
-          :style="{ '--card-from': item.grad[0], '--card-to': item.grad[1] }"
+          :style="{ '--card-from': item.grad[0], '--card-to': item.grad[1], '--i': idx }"
           @click.prevent="emit('navigate', item.key)"
         >
           <div class="feature-icon" v-html="iconSvg(item)"></div>
@@ -236,11 +236,11 @@ function iconSvg(item: ToolCard): string {
       <h2 class="group-title">{{ group.title }}</h2>
       <div class="feature-list">
         <a
-          v-for="item in toolsOf(group.key)"
+          v-for="(item, idx) in toolsOf(group.key)"
           :key="item.key"
           class="feature-card"
           :href="'#/' + item.key"
-          :style="{ '--card-from': item.grad[0], '--card-to': item.grad[1] }"
+          :style="{ '--card-from': item.grad[0], '--card-to': item.grad[1], '--i': idx }"
           @click.prevent="emit('navigate', item.key)"
         >
           <div class="feature-icon" v-html="iconSvg(item)"></div>
@@ -355,6 +355,28 @@ function iconSvg(item: ToolCard): string {
   }
 }
 
+@keyframes logo-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+}
+
+/* 首页功能卡片入场：淡入 + 轻微上浮，逐卡微错开 */
+@keyframes feature-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 .home-logo {
   width: 52px;
   height: 52px;
@@ -367,6 +389,7 @@ function iconSvg(item: ToolCard): string {
   justify-content: center;
   position: relative;
   z-index: 1;
+  animation: logo-breathe 3.6s ease-in-out infinite;
 }
 
 .home-logo svg {
@@ -522,6 +545,9 @@ function iconSvg(item: ToolCard): string {
   padding: 16px 12px 14px;
   cursor: pointer;
   transition: transform 0.2s, box-shadow 0.2s;
+  /* 进入分批上浮：--i 由模板按卡片序号传入，backwards 让动画结束后交还 hover/active 控制 */
+  animation: feature-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: calc(var(--i, 0) * 60ms);
 }
 
 .feature-card.is-featured {
