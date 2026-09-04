@@ -9,10 +9,20 @@ import {
   downloadBlob,
   type LoadedImage,
 } from '../utils/imageLoader'
-import { removeImageBackground, composeBackground, composeBackgroundImage } from '../utils/removeBg'
+import { removeImageBackground, composeBackground, composeBackgroundImage, loadCutoutCanvas } from '../utils/removeBg'
+import { DEFAULT_CUTOUT_STYLE, styleCutout } from '../utils/cutoutStyle'
+import { saveMany } from '../utils/zip'
 import { useAiJob } from '../utils/aiJob'
 import { prepareAiModel } from '../utils/aiModel'
-import { ID_PHOTO_SPECS, fitToSpec, layoutOnSheet } from '../utils/idPhoto'
+import {
+  ID_PHOTO_SPECS,
+  ID_PHOTO_SPEC_GROUPS,
+  mmToPx300,
+  fitToSpec,
+  layoutOnSheet,
+  type IdPhotoSpec,
+} from '../utils/idPhoto'
+import { canvasToPdfBlob } from '../utils/pdf'
 import { showToast } from '../utils/toast'
 import { fetchSampleFile } from '../utils/sampleImage'
 import CompareSlider from '../components/CompareSlider.vue'
@@ -45,7 +55,24 @@ const bgFileInput = ref<HTMLInputElement | null>(null)
 const specKey = ref('')
 const sheetMode = ref(false)
 
-const currentSpec = computed(() => ID_PHOTO_SPECS.find((s) => s.key === specKey.value) ?? null)
+/** 自定义规格尺寸（mm），非法输入在 change 时纠正到 10~200 的合理打印范围 */
+const customW = ref(33)
+const customH = ref(48)
+
+function clampMm(v: number): number {
+  // 非法输入（如清空）回退到 33×48 这个最常用档
+  if (!Number.isFinite(v)) return 33
+  return Math.round(Math.min(200, Math.max(10, v)))
+}
+
+const currentSpec = computed<IdPhotoSpec | null>(() => {
+  if (specKey.value === 'custom') {
+    const w = clampMm(customW.value)
+    const h = clampMm(customH.value)
+    return { key: 'custom', label: `自定义${w}x${h}mm`, mm: [w, h], width: mmToPx300(w), height: mmToPx300(h) }
+  }
+  return ID_PHOTO_SPECS.find((s) => s.key === specKey.value) ?? null
+})
 
 // 人物定位焦点（拖动十字 + 缩放），仅规格裁切时生效
 const focus = reactive({ x: 0.5, y: 0.5, zoom: 1 })
@@ -138,6 +165,7 @@ async function processFile(file: File) {
   bgColor.value = '#ffffff'
   bgImageUrl.value = ''
   bgImageEl = null
+  styledCache.value = null
   focus.x = 0.5
   focus.y = 0.5
   focus.zoom = 1
@@ -197,6 +225,7 @@ async function startRemove() {
       return removeImageBackground(dataUrl, (p) => report(p.percent, p.stage))
     })
     resultBlob.value = blob
+    styledCache.value = null
     await applyBgColor()
     resultReady.value = true
   } catch (error) {
@@ -223,13 +252,15 @@ async function sourceFile(): Promise<File> {
   )
 }
 
-/** 生成最终结果画布：抠图 + 底色 + 规格裁切 + 一版多张排版 */
-async function buildResultCanvas(): Promise<HTMLCanvasElement> {
+/** 生成最终结果画布：抠图(+边缘精修) + 底色 + 规格裁切 + 一版多张排版；传入 bgOverride 时按指定底色生成（多底色导出用，忽略自定义背景图） */
+async function buildResultCanvas(bgOverride?: string): Promise<HTMLCanvasElement> {
   if (!resultBlob.value) throw new Error('尚无处理结果')
-  const base = bgImageEl
-    ? await composeBackgroundImage(resultBlob.value, bgImageEl)
-    : await composeBackground(resultBlob.value, bgColor.value)
-  flatCanvas = base
+  const styled = await getStyledCanvas()
+  const base = bgOverride != null
+    ? await composeBackground(styled, bgOverride)
+    : bgImageEl
+      ? await composeBackgroundImage(resultBlob.value, bgImageEl)
+      : await composeBackground(styled, bgColor.value)
   const canvas = currentSpec.value
     ? fitToSpec(base, currentSpec.value, { x: focus.x, y: focus.y, zoom: focus.zoom })
     : base
@@ -239,6 +270,35 @@ async function buildResultCanvas(): Promise<HTMLCanvasElement> {
   return canvas
 }
 
+/** 边缘精修：收缩吃掉发丝边的原底色残留，羽化柔化过渡（只改 alpha，尺寸不变） */
+const edgeShrink = ref(1)
+const edgeFeather = ref(0)
+/** 边缘处理结果按参数缓存：拖动人物焦点时的高频重建不必反复跑滤波 */
+const styledCache = ref<{ shrink: number; feather: number; canvas: HTMLCanvasElement } | null>(null)
+
+async function getStyledCanvas(): Promise<HTMLCanvasElement> {
+  if (!resultBlob.value) throw new Error('尚无处理结果')
+  const cached = styledCache.value
+  if (cached && cached.shrink === edgeShrink.value && cached.feather === edgeFeather.value) {
+    return cached.canvas
+  }
+  const base = await loadCutoutCanvas(resultBlob.value)
+  const canvas = styleCutout(base, {
+    ...DEFAULT_CUTOUT_STYLE,
+    outlineWidth: 0,
+    shadowBlur: 0,
+    shrinkWidth: edgeShrink.value,
+    featherWidth: edgeFeather.value,
+  })
+  styledCache.value = { shrink: edgeShrink.value, feather: edgeFeather.value, canvas }
+  return canvas
+}
+
+async function changeEdge() {
+  if (!resultBlob.value) return
+  await applyBgColor()
+}
+
 async function applyBgColor() {
   if (!resultBlob.value) return
   const canvas = await buildResultCanvas()
@@ -246,10 +306,20 @@ async function applyBgColor() {
   if (flatCanvas) flatUrl.value = flatCanvas.toDataURL('image/png')
 }
 
-/** 切换证件照规格（无规格 = 原尺寸） */
+/** 切换证件照规格（无规格 = 原尺寸，custom = 自定义毫米尺寸） */
 async function changeSpec(key: string) {
   if (specKey.value === key) return
   specKey.value = key
+  if (resultBlob.value) {
+    await applyBgColor()
+  }
+}
+
+/** 自定义尺寸输入变更：先纠正非法值再重建结果 */
+async function onCustomSizeInput(which: 'w' | 'h', event: Event) {
+  const v = (event.target as HTMLInputElement).valueAsNumber
+  if (which === 'w') customW.value = clampMm(v)
+  else customH.value = clampMm(v)
   if (resultBlob.value) {
     await applyBgColor()
   }
@@ -344,6 +414,52 @@ async function saveResult() {
   }
 }
 
+async function exportPdf() {
+  if (!source.value || !resultBlob.value || pdfBusy.value) return
+  pdfBusy.value = true
+  try {
+    const canvas = await buildResultCanvas()
+    const pdf = await canvasToPdfBlob(canvas)
+    const label = bgImageEl ? '背景图' : (BG_COLORS.find((c) => c.value === bgColor.value)?.label ?? '')
+    const specLabel = currentSpec.value ? `_${currentSpec.value.label}` : ''
+    downloadBlob(pdf, `${source.value.name}_证件照${specLabel}${label}_6寸版.pdf`)
+    showToast('PDF 已开始下载，打印时选「实际大小」', 'success')
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : 'PDF 导出失败', 'error')
+  } finally {
+    pdfBusy.value = false
+  }
+}
+
+/** 多底色一键导出：报名系统要蓝底、打印要白底，一次出齐免得反复切换下载（忽略自定义背景图） */
+const MULTI_BG_TARGETS = [
+  { label: '白底', color: '#ffffff' },
+  { label: '蓝底', color: '#438edb' },
+  { label: '红底', color: '#d9001b' },
+]
+const multiBusy = ref(false)
+async function exportMultiBg() {
+  if (!source.value || !resultBlob.value || multiBusy.value) return
+  multiBusy.value = true
+  try {
+    const specLabel = currentSpec.value ? `_${currentSpec.value.label}` : ''
+    const files: File[] = []
+    for (const t of MULTI_BG_TARGETS) {
+      const canvas = await buildResultCanvas(t.color)
+      files.push(await canvasToFile(canvas, `${source.value.name}_证件照${specLabel}_${t.label}.jpg`, 'image/jpeg', 0.95))
+    }
+    await saveMany(files, `${source.value.name}_证件照${specLabel}_多底色.zip`)
+    showToast('三种底色已打包下载', 'success')
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : '导出失败', 'error')
+  } finally {
+    multiBusy.value = false
+  }
+}
+
+/** 导出一版多张打印 PDF：页面物理尺寸与排版图一致，打印店选「实际大小」直接出片 */
+const pdfBusy = ref(false)
+
 function refreshSourceUrl() {
   if (!source.value) return
   const canvas = document.createElement('canvas')
@@ -380,9 +496,9 @@ onUnmounted(() => {
         <div class="empty-icon" v-html="EMPTY_ICON"></div>
         <div>选择一张人像照片，AI 自动抠图换底色</div>
         <div class="empty-actions">
-                  <button class="btn btn-primary" style="width: 180px" @click="pickImage">选择照片</button>
-                  <button class="btn btn-sample" @click="loadSample">体验示例图</button>
-                </div>
+          <button class="btn btn-primary" style="width: 180px" @click="pickImage">选择照片</button>
+          <button class="btn btn-sample" @click="loadSample">体验示例图</button>
+        </div>
         <p class="tip-text" style="max-width: 280px; text-align: center">
           首次使用需下载 AI 模型（约 42MB），仅一次、之后可离线使用。全程本地处理，照片不会上传。
         </p>
@@ -436,26 +552,96 @@ onUnmounted(() => {
               </div>
             </div>
           </div>
-          <p class="tip-text">白底、蓝底、红底为常见证件照背景色；也可选择自定义背景图，与纯色/透明互斥。</p>
-
           <div class="form-row" style="margin-top: 12px">
-            <span class="label">规格</span>
-            <div style="display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end">
-              <div
-                class="pos-chip"
-                :class="{ active: specKey === '' }"
-                @click="changeSpec('')"
-              >
-                原尺寸
+            <span class="label">边缘收缩</span>
+            <div class="edge-ctrl">
+              <input
+                v-model.number="edgeShrink"
+                type="range"
+                min="0"
+                max="6"
+                step="1"
+                class="edge-range"
+                @change="changeEdge"
+              />
+              <span class="range-value">{{ edgeShrink || '关' }}</span>
+            </div>
+          </div>
+          <div class="form-row">
+            <span class="label">边缘羽化</span>
+            <div class="edge-ctrl">
+              <input
+                v-model.number="edgeFeather"
+                type="range"
+                min="0"
+                max="8"
+                step="1"
+                class="edge-range"
+                @change="changeEdge"
+              />
+              <span class="range-value">{{ edgeFeather || '关' }}</span>
+            </div>
+          </div>
+          <p class="tip-text">换底后发丝边缘有白边残留时，把收缩调到 1~2 吃掉；羽化让边缘与新背景的过渡更柔。</p>
+          <div class="form-row">
+            <span class="label">多底色</span>
+            <button class="btn btn-outline inline-btn" :disabled="multiBusy" @click="exportMultiBg">
+              {{ multiBusy ? '生成中…' : '白/蓝/红 打包下载' }}
+            </button>
+          </div>
+          <p class="tip-text">白底、蓝底、红底为常见证件照背景色；也可选择自定义背景图，与纯色/透明互斥。多底色按当前规格与排版设置一键出齐三种底色。</p>
+
+          <div class="form-row" style="margin-top: 12px; align-items: flex-start">
+            <span class="label" style="padding-top: 7px">规格</span>
+            <div class="spec-groups">
+              <div v-for="g in ID_PHOTO_SPEC_GROUPS" :key="g.key" class="spec-row">
+                <span class="spec-group-name">{{ g.label }}</span>
+                <div class="spec-chips">
+                  <div
+                    v-if="g.key === 'common'"
+                    class="pos-chip"
+                    :class="{ active: specKey === '' }"
+                    @click="changeSpec('')"
+                  >
+                    原尺寸
+                  </div>
+                  <div
+                    v-for="s in g.specs"
+                    :key="s.key"
+                    class="pos-chip"
+                    :class="{ active: specKey === s.key }"
+                    @click="changeSpec(s.key)"
+                  >
+                    {{ s.label }}
+                  </div>
+                </div>
               </div>
-              <div
-                v-for="s in ID_PHOTO_SPECS"
-                :key="s.key"
-                class="pos-chip"
-                :class="{ active: specKey === s.key }"
-                @click="changeSpec(s.key)"
-              >
-                {{ s.label }}
+              <div class="spec-row">
+                <span class="spec-group-name">自定义</span>
+                <div class="spec-chips">
+                  <div class="pos-chip" :class="{ active: specKey === 'custom' }" @click="changeSpec('custom')">自定义尺寸</div>
+                  <template v-if="specKey === 'custom'">
+                    <span class="spec-unit">宽</span>
+                    <input
+                      class="spec-input"
+                      type="number"
+                      min="10"
+                      max="200"
+                      :value="customW"
+                      @change="onCustomSizeInput('w', $event)"
+                    />
+                    <span class="spec-unit">× 高</span>
+                    <input
+                      class="spec-input"
+                      type="number"
+                      min="10"
+                      max="200"
+                      :value="customH"
+                      @change="onCustomSizeInput('h', $event)"
+                    />
+                    <span class="spec-unit">mm</span>
+                  </template>
+                </div>
               </div>
             </div>
           </div>
@@ -501,9 +687,15 @@ onUnmounted(() => {
               <p class="tip-text">拖动十字使人物位于裁切中心，缩放可控制人物大小。</p>
             </div>
           </div>
+          <div v-if="sheetMode && resultReady" class="form-row" style="margin-top: 8px">
+            <span class="label">打印</span>
+            <button class="btn btn-outline inline-btn" :disabled="pdfBusy" @click="exportPdf">
+              {{ pdfBusy ? '生成中…' : '导出打印 PDF' }}
+            </button>
+          </div>
           <p class="tip-text">
-            {{ currentSpec ? `${currentSpec.label}规格输出 ${currentSpec.width}×${currentSpec.height} 像素（300dpi），按规格居中裁切，请确保人像位于照片中央。` : '不限制输出尺寸，保持原图比例。' }}
-            {{ sheetMode ? '一版多张为 6 寸相纸排版，可直接打印。' : '' }}
+            {{ currentSpec ? `${currentSpec.label}规格输出 ${currentSpec.width}×${currentSpec.height} 像素（300dpi，约 ${currentSpec.mm[0]}×${currentSpec.mm[1]}mm），按规格居中裁切，请确保人像位于照片中央。` : '不限制输出尺寸，保持原图比例。' }}
+            {{ sheetMode ? '一版多张为 6 寸相纸排版，可直接打印，也可导出打印 PDF。' : '' }}
           </p>
         </div>
 
@@ -594,6 +786,75 @@ onUnmounted(() => {
   color: var(--primary);
   font-weight: 600;
   box-shadow: 0 2px 6px rgba(79, 110, 247, 0.12);
+}
+
+/* 规格分组：组名窄列右对齐，chips 紧贴组名不推到行尾 */
+.spec-groups {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.spec-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.spec-group-name {
+  flex-shrink: 0;
+  width: 64px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--text-sub);
+}
+
+.spec-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 自定义尺寸输入：窄数字框，非法值在 change 时纠正 */
+.spec-input {
+  width: 64px;
+  padding: 6px 8px;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  font-size: 13px;
+  color: inherit;
+}
+
+.spec-unit {
+  font-size: 12px;
+  color: var(--text-sub);
+}
+
+/* 卡片内联导出按钮（打印 PDF / 多底色）：不占底栏 */
+.inline-btn {
+  width: auto;
+  padding: 8px 16px;
+  font-size: 13px;
+  border-radius: 10px;
+}
+
+/* 边缘精修滑杆：与一版多张行同构，控件贴行尾收窄 */
+.edge-ctrl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  justify-content: flex-end;
+}
+
+.edge-range {
+  flex: 1;
+  max-width: 220px;
+  accent-color: var(--primary);
 }
 
 /* 背景图选择 */

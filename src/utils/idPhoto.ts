@@ -8,19 +8,66 @@
 export interface IdPhotoSpec {
   key: string
   label: string
+  /** 物理尺寸（mm，宽×高），供提示展示与换算对账 */
+  mm: [number, number]
   /** 规格像素宽度（300dpi） */
   width: number
   /** 规格像素高度（300dpi） */
   height: number
 }
 
-export const ID_PHOTO_SPECS: IdPhotoSpec[] = [
-  { key: 'one', label: '一寸', width: 295, height: 413 },
-  { key: 'small-one', label: '小一寸', width: 260, height: 378 },
-  { key: 'large-one', label: '大一寸', width: 390, height: 567 },
-  { key: 'two', label: '二寸', width: 413, height: 579 },
-  { key: 'small-two', label: '小二寸', width: 413, height: 531 },
+/** 规格分组：按用户找得到的名字分（考试叫“四六级”，不叫“33×48 毫米”） */
+export interface IdPhotoSpecGroup {
+  key: string
+  label: string
+  specs: IdPhotoSpec[]
+}
+
+/** 毫米转 300dpi 像素 */
+export function mmToPx300(mm: number): number {
+  return Math.round((mm / 25.4) * 300)
+}
+
+/** 像素转 300dpi 物理尺寸（mm） */
+export function px300ToMm(px: number): number {
+  return Math.round((px / 300) * 25.4 * 10) / 10
+}
+
+/** 规格按用途分组展示；四六级/教资等与通用寸照同尺寸但仍单列，用户找的是用途不是毫米数 */
+export const ID_PHOTO_SPEC_GROUPS: IdPhotoSpecGroup[] = [
+  {
+    key: 'common',
+    label: '常用',
+    specs: [
+      { key: 'one', label: '一寸', mm: [25, 35], width: 295, height: 413 },
+      { key: 'small-one', label: '小一寸', mm: [22, 32], width: 260, height: 378 },
+      { key: 'large-one', label: '大一寸', mm: [33, 48], width: 390, height: 567 },
+      { key: 'two', label: '二寸', mm: [35, 49], width: 413, height: 579 },
+      { key: 'small-two', label: '小二寸', mm: [35, 45], width: 413, height: 531 },
+    ],
+  },
+  {
+    key: 'career',
+    label: '考试·职业',
+    specs: [
+      { key: 'cet-teach', label: '四六级/教资', mm: [33, 48], width: 390, height: 567 },
+      { key: 'driver', label: '驾驶证', mm: [22, 32], width: 260, height: 378 },
+      { key: 'social-security', label: '社保照', mm: [26, 32], width: 307, height: 378 },
+    ],
+  },
+  {
+    key: 'visa',
+    label: '签证',
+    specs: [
+      { key: 'visa-us', label: '美国签证', mm: [51, 51], width: 602, height: 602 },
+      { key: 'visa-ca', label: '加拿大签证', mm: [50, 70], width: 591, height: 827 },
+      { key: 'visa-schengen', label: '申根签证', mm: [35, 45], width: 413, height: 531 },
+    ],
+  },
 ]
+
+/** 全量扁平规格列表（由分组派生，供按 key 查找） */
+export const ID_PHOTO_SPECS: IdPhotoSpec[] = ID_PHOTO_SPEC_GROUPS.flatMap((g) => g.specs)
 
 /** 6 寸相纸尺寸（152 × 102 mm，300dpi） */
 export const SHEET_WIDTH = 1795
