@@ -11,7 +11,8 @@ import {
   downloadBlob,
   type LoadedImage,
 } from '../utils/imageLoader'
-import { useAiJob } from '../utils/aiJob'
+import { useAiJob, hydrateJob } from '../utils/aiJob'
+import { aiStageLabel } from '../utils/aiStage'
 import {
   removeImageBackground,
   composeBackground,
@@ -28,10 +29,24 @@ import {
 } from '../utils/cutoutStyle'
 import { showToast } from '../utils/toast'
 import { fetchSampleFile } from '../utils/sampleImage'
+import { readExifInfo, type ExifInfo } from '../utils/exif'
+import ImageInfoCard from '../components/ImageInfoCard.vue'
+import AiModelBanner from '../components/AiModelBanner.vue'
 import CompareSlider from '../components/CompareSlider.vue'
 import ShareButton from '../components/ShareButton.vue'
+import CopyButton from '../components/CopyButton.vue'
 
-const emit = defineEmits<{ back: []; consumed: [] }>()
+const emit = defineEmits<{ back: []; consumed: []; navigate: [view: BgNextToolKey, file: File] }>()
+
+type BgNextToolKey = 'idPhoto' | 'compress' | 'format'
+
+/** 抠图成品的自然去向：换成证件照颜色/尺寸、压缩、转格式 */
+const NEXT_TOOLS: { key: BgNextToolKey; label: string }[] = [
+  { key: 'compress', label: '压缩' },
+  { key: 'format', label: '转换' },
+  { key: 'idPhoto', label: '证件照' },
+]
+const showNextTools = ref(false)
 
 const props = defineProps<{ incomingFile?: File | null }>()
 
@@ -55,6 +70,8 @@ interface EraseStroke {
 const fileInput = ref<HTMLInputElement | null>(null)
 const source = ref<LoadedImage | null>(null)
 const sourceFileRef = ref<File | null>(null)
+/** 源 JPEG 的拍摄信息，用于界面展示（非 JPEG 或无 EXIF 时为空） */
+const exifInfo = ref<ExifInfo | null>(null)
 const processing = ref(false)
 const job = useAiJob<CutoutResult>('cutout')
 const progress = computed(() => ({ percent: job.percent, stage: job.stage }))
@@ -131,9 +148,17 @@ async function handleFileChange(event: Event) {
   }
 }
 
+/** 读取源 JPEG 的拍摄信息；读取失败时静默置空，不阻塞主流程 */
+function loadExif(file: File) {
+  readExifInfo(file)
+    .then((info) => (exifInfo.value = info))
+    .catch(() => (exifInfo.value = null))
+}
+
 /** 加载图片并开始抠图 */
 async function processFile(file: File) {
   sourceFileRef.value = file
+  loadExif(file)
   source.value = await loadImageFromFile(file)
   refreshSourceUrl()
   resultReady.value = false
@@ -157,7 +182,7 @@ async function loadSample() {
 
 // 接收其他工具流转过来的图片（如图片编辑 → 抠图）；
 // 没有新图时先看共享任务：切去别的工具再回来，进度和结果都还在
-onMounted(() => {
+onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
   if (props.incomingFile) {
     processFile(props.incomingFile).catch((error) => {
@@ -166,6 +191,8 @@ onMounted(() => {
     emit('consumed')
     return
   }
+  // 强刷回来先恢复可能进行中的任务，再判断是否要接着跑
+  await hydrateJob('cutout')
   const file = job.input
   if (file && job.status !== 'idle') restoreJob(file).catch(() => showToast('图片加载失败', 'error'))
 })
@@ -173,6 +200,7 @@ onMounted(() => {
 /** 用共享任务里记住的那张图恢复界面，再接回同一次抠图 */
 async function restoreJob(file: File) {
   sourceFileRef.value = file
+  loadExif(file)
   source.value = await loadImageFromFile(file)
   refreshSourceUrl()
   if (job.status === 'error') {
@@ -192,7 +220,7 @@ async function startRemove() {
     // 任务本体交给共享登记表：跑完的结果与笔迹都挂在上面，视图卸载也不影响它
     const result = await job.run(file, async (report) => {
       const dataUrl = await fileToDataUrl(file)
-      // 模型准备单独走共享进度：下载 42MB 期间切去其他工具也不会丢
+      // 模型准备单独走共享进度：下载 84MB 期间切去其他工具也不会丢
       await prepareAiModel()
       report(1)
       const blob = await removeImageBackground(dataUrl, (p) => report(p.percent, p.stage))
@@ -534,6 +562,15 @@ async function saveResult() {
   showToast('已开始下载', 'success')
 }
 
+/** 导出当前成品并跳转到目标工具继续处理 */
+function continueTo(key: BgNextToolKey) {
+  buildResultFile().then((file) => {
+    if (!file) return
+    showNextTools.value = false
+    emit('navigate', key, file)
+  })
+}
+
 const sourceUrl = ref('')
 // 在选图后生成源图预览
 async function refreshSourceUrl() {
@@ -572,16 +609,18 @@ onUnmounted(() => {
     </div>
 
     <div class="page-content tool-page">
+      <AiModelBanner />
       <!-- 未选图状态 -->
       <div v-if="!source" class="empty-state">
         <div class="empty-icon" v-html="EMPTY_ICON"></div>
         <div>选择一张图片，AI 自动去除背景</div>
+        <p class="empty-hint">适合做海报贴纸、换背景，或把人物干净地抠出来</p>
         <div class="empty-actions">
                   <button class="btn btn-primary" style="width: 180px" @click="pickImage">选择图片</button>
                   <button class="btn btn-sample" @click="loadSample">体验示例图</button>
                 </div>
         <p class="tip-text" style="max-width: 280px; text-align: center">
-          首次使用需下载 AI 模型（约 42MB），仅一次、之后可离线使用。全程本地处理，图片不会上传。
+          首次使用需下载 AI 模型（约 84MB 高清档），仅一次、之后可离线使用。全程本地处理，图片不会上传。
         </p>
       </div>
 
@@ -594,8 +633,8 @@ onUnmounted(() => {
               <div class="progress-inner" :style="{ width: progress.percent + '%' }"></div>
             </div>
             <div class="progress-text">
-              {{ progress.stage }} {{ progress.percent }}%
-            </div>
+                {{ aiStageLabel(progress.stage) }} {{ progress.percent }}%
+              </div>
           </div>
 
           <div v-else-if="resultReady && eraseMode" class="erase-wrap">
@@ -636,6 +675,14 @@ onUnmounted(() => {
             <span class="style-jump-arrow">↓</span>
           </button>
         </div>
+
+        <!-- 图片信息：基础文件信息 + 拍摄信息，合并成一张卡 -->
+        <ImageInfoCard
+          :file="sourceFileRef"
+          :width="source?.width ?? null"
+          :height="source?.height ?? null"
+          :exif="exifInfo"
+        />
 
         <!-- 背景色设置 -->
         <div v-if="resultReady" class="card">
@@ -737,13 +784,31 @@ onUnmounted(() => {
         </div>
 
         <p v-if="processing" class="tip-text">全程本地处理，切去别的工具也不会打断，回来接着看。</p>
+
+        <!-- 继续处理：把成品喂给下一个工具 -->
+        <div v-if="showNextTools && resultReady" class="card">
+          <div class="card-title">继续处理</div>
+          <div style="display: flex; flex-wrap: wrap; gap: 8px">
+            <button
+              v-for="tool in NEXT_TOOLS"
+              :key="tool.key"
+              class="btn btn-outline"
+              style="flex: 1; min-width: 80px"
+              @click="continueTo(tool.key)"
+            >
+              {{ tool.label }}
+            </button>
+          </div>
+        </div>
       </template>
     </div>
 
     <!-- 底部操作栏 -->
     <div v-if="source" class="bottom-bar">
       <button class="btn btn-ghost" @click="pickImage">重新选图</button>
+      <button v-if="resultReady" class="btn btn-outline" @click="showNextTools = !showNextTools">继续处理</button>
       <ShareButton v-if="resultReady" :get-files="resultFiles" variant="outline" />
+      <CopyButton v-if="resultReady" :get-files="resultFiles" variant="outline" />
       <button v-if="!resultReady" class="btn btn-primary" :disabled="processing" @click="startRemove">
         {{ processing ? '处理中…' : '开始抠图' }}
       </button>

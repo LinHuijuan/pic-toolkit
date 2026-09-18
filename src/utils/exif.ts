@@ -139,3 +139,231 @@ export async function withJpegMetadata(output: Blob, source: Blob | null | undef
   parts.push(bytes.subarray(at))
   return new Blob(parts, { type: 'image/jpeg' })
 }
+
+/* ---------------------------------------------------------------------------
+ * 拍摄信息读取（仅用于在界面展示，不参与导出）
+ *
+ * 上面 extractJpegMetadata 是「整段搬运」只取字节不解析；这里才真正读 TIFF/EXIF
+ * 的 IFD 字段，把相机、拍摄时间、曝光参数、GPS 等变成人能看懂的文本。
+ * 同样只认 JPEG（APP1 段是 Exif），命中不了就返回 null，渲染端据此选择不展示。
+ * ------------------------------------------------------------------------- */
+
+export interface ExifInfo {
+  /** 拍摄设备品牌 */
+  make?: string
+  /** 设备型号 */
+  model?: string
+  /** 拍摄时间（已转成 YYYY-MM-DD HH:MM） */
+  datetime?: string
+  /** 快门，如 1/200 秒 */
+  exposure?: string
+  /** 光圈，如 f/2.8 */
+  fnumber?: string
+  /** ISO 感光度，如 ISO 200 */
+  iso?: string
+  /** 焦距，如 35mm */
+  focalLength?: string
+  /** 简短 GPS 坐标，如 N 23.1234° E 113.5678° */
+  gps?: string
+}
+
+/** Exif 字段 ID */
+const T_MAKE = 0x010f
+const T_MODEL = 0x0110
+const T_DATETIME = 0x0132
+const T_EXIF_IFD = 0x8769
+const T_GPS_IFD = 0x8825
+const T_EXPOSURE = 0x829a
+const T_FNUMBER = 0x829d
+const T_ISO = 0x8827
+const T_DATETIME_ORIG = 0x9003
+const T_FOCAL = 0x920a
+const T_GPS_LAT_REF = 0x0001
+const T_GPS_LAT = 0x0002
+const T_GPS_LON_REF = 0x0003
+const T_GPS_LON = 0x0004
+
+/** 在指定 IFD 里按 tag 找条目的起始偏移，找不到返回 -1 */
+function findEntry(
+  dv: DataView,
+  little: boolean,
+  ifdOffset: number,
+  tag: number,
+): number {
+  if (ifdOffset < 0 || ifdOffset + 2 > dv.byteLength) return -1
+  const count = dv.getUint16(ifdOffset, little)
+  for (let n = 0; n < count; n++) {
+    const entry = ifdOffset + 2 + n * 12
+    if (entry + 12 > dv.byteLength) return -1
+    if (dv.getUint16(entry, little) === tag) return entry
+  }
+  return -1
+}
+
+/** 读无符号值：按 tag 的实际类型（LONG=4 / SHORT=3 / BYTE=1）取对应宽度 */
+function readUint(dv: DataView, little: boolean, base: number, entry: number): number {
+  const type = dv.getUint16(entry + 2, little)
+  const count = dv.getUint32(entry + 4, little)
+  const sizeOf = type === 4 ? 4 : type === 3 ? 2 : 1
+  const inline = count * sizeOf <= 4
+  const at = inline
+    ? entry + 8
+    : base + dv.getUint32(entry + 8, little)
+  if (type === 4) return dv.getUint32(at, little)
+  if (type === 3) return dv.getUint16(at, little)
+  return dv.getUint8(at)
+}
+
+/** 读 ASCII 字符串（可能是 inline 4 字节内，也可能是偏移指向的缓冲区） */
+function readAscii(dv: DataView, little: boolean, base: number, entry: number): string | undefined {
+  const count = dv.getUint32(entry + 4, little)
+  const off = count <= 4 ? entry + 8 : base + dv.getUint32(entry + 8, little)
+  let s = ''
+  for (let i = 0; i < count; i++) {
+    const c = dv.getUint8(off + i)
+    if (c === 0) break
+    s += String.fromCharCode(c)
+  }
+  const trimmed = s.trim()
+  return trimmed || undefined
+}
+
+/** 读 RATIONAL（分子/分母各一个 LONG） */
+function readRational(dv: DataView, little: boolean, base: number, entry: number): number {
+  const off = base + dv.getUint32(entry + 8, little)
+  const num = dv.getUint32(off, little)
+  const den = dv.getUint32(off + 4, little)
+  return den === 0 ? NaN : num / den
+}
+
+/** 快门时间的展示：>1 秒直接写秒，否则写成 1/n */
+function formatExposure(s: number): string | undefined {
+  if (!Number.isFinite(s) || s <= 0) return undefined
+  if (s >= 1) return `${Math.round(s * 10) / 10} 秒`
+  const den = Math.round(1 / s)
+  return `1/${den} 秒`
+}
+
+function formatDate(raw: string): string | undefined {
+  // 标准 EXIF 格式 YYYY:MM:DD HH:MM:SS
+  const m = raw.match(/^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2})(?::\d{2})?$/)
+  if (!m) return raw
+  return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}`
+}
+
+function degreesToDecimal(
+  dv: DataView,
+  little: boolean,
+  base: number,
+  dEntry: number,
+): number {
+  const off = base + dv.getUint32(dEntry + 8, little)
+  const deg = dv.getUint32(off, little) / (dv.getUint32(off + 4, little) || 1)
+  const min = dv.getUint32(off + 8, little) / (dv.getUint32(off + 12, little) || 1)
+  const sec = dv.getUint32(off + 16, little) / (dv.getUint32(off + 20, little) || 1)
+  return deg + min / 60 + sec / 3600
+}
+
+/** 从 Exif 段（去掉 "Exif\0\0" 头）解析 TIFF 并提取拍摄信息 */
+function parseTiff(exifBytes: Uint8Array): ExifInfo | null {
+  if (exifBytes.length < 14) return null
+  const little = exifBytes[0] === 0x49 && exifBytes[1] === 0x49
+  if (!little && !(exifBytes[0] === 0x4d && exifBytes[1] === 0x4d)) return null
+  const dv = new DataView(exifBytes.buffer, exifBytes.byteOffset, exifBytes.byteLength)
+  const base = 8
+  const ifd0 = dv.getUint32(4, little)
+  const info: ExifInfo = {}
+
+  info.make = readTagString(dv, little, base, ifd0, T_MAKE)
+  info.model = readTagString(dv, little, base, ifd0, T_MODEL)
+  const date = readTagString(dv, little, base, ifd0, T_DATETIME)
+  if (date) info.datetime = formatDate(date)
+
+  const exifIfd = findEntry(dv, little, ifd0, T_EXIF_IFD)
+    ? base + readUint(dv, little, base, findEntry(dv, little, ifd0, T_EXIF_IFD))
+    : -1
+  if (exifIfd >= 0) {
+    const origin = readTagString(dv, little, base, exifIfd, T_DATETIME_ORIG)
+    if (origin) info.datetime = formatDate(origin)
+    const expEntry = findEntry(dv, little, exifIfd, T_EXPOSURE)
+    if (expEntry >= 0) info.exposure = formatExposure(readRational(dv, little, base, expEntry))
+    const fEntry = findEntry(dv, little, exifIfd, T_FNUMBER)
+    if (fEntry >= 0) {
+      const v = readRational(dv, little, base, fEntry)
+      if (Number.isFinite(v)) info.fnumber = `f/${Math.round(v * 10) / 10}`
+    }
+    const isoEntry = findEntry(dv, little, exifIfd, T_ISO)
+    if (isoEntry >= 0) info.iso = `ISO ${readUint(dv, little, base, isoEntry)}`
+    const focalEntry = findEntry(dv, little, exifIfd, T_FOCAL)
+    if (focalEntry >= 0) {
+      const v = readRational(dv, little, base, focalEntry)
+      if (Number.isFinite(v)) info.focalLength = `${Math.round(v)}mm`
+    }
+  }
+
+  const gpsIfd = findEntry(dv, little, ifd0, T_GPS_IFD)
+    ? base + readUint(dv, little, base, findEntry(dv, little, ifd0, T_GPS_IFD))
+    : -1
+  if (gpsIfd >= 0) {
+    const latEntry = findEntry(dv, little, gpsIfd, T_GPS_LAT)
+    const lonEntry = findEntry(dv, little, gpsIfd, T_GPS_LON)
+    if (latEntry >= 0 && lonEntry >= 0) {
+      const lat = degreesToDecimal(dv, little, base, latEntry)
+      const lon = degreesToDecimal(dv, little, base, lonEntry)
+      const latRef = readTagString(dv, little, base, gpsIfd, T_GPS_LAT_REF) ?? 'N'
+      const lonRef = readTagString(dv, little, base, gpsIfd, T_GPS_LON_REF) ?? 'E'
+      const latStr = `${latRef === 'N' ? 'N' : 'S'} ${lat.toFixed(1)}°`
+      const lonStr = `${lonRef === 'E' ? 'E' : 'W'} ${lon.toFixed(1)}°`
+      info.gps = `${latStr} ${lonStr}`
+    }
+  }
+
+  return info
+}
+
+/** 在某个 IFD 里读 ASCII 字符串字段 */
+function readTagString(
+  dv: DataView,
+  little: boolean,
+  base: number,
+  ifdOffset: number,
+  tag: number,
+): string | undefined {
+  const entry = findEntry(dv, little, ifdOffset, tag)
+  return entry < 0 ? undefined : readAscii(dv, little, base, entry)
+}
+
+/** 从一张图片中读出拍摄信息；非 JPEG 或没有 Exif 段时返回 null */
+export async function readExifInfo(source: Blob): Promise<ExifInfo | null> {
+  if (!source || !source.type.includes('jpeg')) return null
+  const bytes = new Uint8Array(await source.arrayBuffer())
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null
+
+  let i = 2
+  while (i + 4 <= bytes.length) {
+    if (bytes[i] !== 0xff) break
+    const marker = bytes[i + 1]
+    if (marker === 0xda || marker === 0xd9) break
+    if (isStandaloneMarker(marker)) {
+      i += 2
+      continue
+    }
+    const len = (bytes[i + 2] << 8) | bytes[i + 3]
+    if (len < 2) break
+    const end = i + 2 + len
+    if (end > bytes.length) break
+    // APP1 且标识是 "Exif\0\0"（段体从 FF E1 + 长度之后开始，即 i+4）
+    const body = i + 4
+    if (
+      marker === 0xe1 &&
+      body + 6 <= end &&
+      bytes[body] === 0x45 && bytes[body + 1] === 0x78 && bytes[body + 2] === 0x69 &&
+      bytes[body + 3] === 0x66 && bytes[body + 4] === 0x00 && bytes[body + 5] === 0x00
+    ) {
+      // 去掉 6 字节 "Exif\0\0"，剩下的就是 TIFF 头
+      return parseTiff(bytes.subarray(body + 6, end))
+    }
+    i = end
+  }
+  return null
+}

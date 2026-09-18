@@ -5,10 +5,18 @@ import { loadImageFromFile, downloadBlob, type LoadedImage } from '../utils/imag
 import { saveMany } from '../utils/zip'
 import { convertImageFormat, type OutputFormat } from '../utils/imageFormat'
 import { showToast } from '../utils/toast'
+import { runConcurrent } from '../utils/concurrency'
+import { readExifInfo, type ExifInfo } from '../utils/exif'
 import { fetchSampleFiles } from '../utils/sampleImage'
+import ExifPanel from '../components/ExifPanel.vue'
 import ShareButton from '../components/ShareButton.vue'
+import NextTools from '../components/NextTools.vue'
 
-const emit = defineEmits<{ back: []; consumed: [] }>()
+const emit = defineEmits<{
+  back: []
+  consumed: []
+  navigate: [view: 'compress' | 'grid', file: File]
+}>()
 
 const props = defineProps<{ incomingFile?: File | null }>()
 
@@ -22,8 +30,14 @@ const items = ref<ConvertItem[]>([])
 const targetFormat = ref<OutputFormat>('jpeg')
 /** 保留源 JPEG 的拍摄信息：默认关，EXIF 可能含 GPS，导出前由用户显式选择 */
 const keepMeta = ref(false)
+/** JPEG 编码质量（0~1），可按需压低体积 */
+const jpegQuality = ref(0.92)
 const processing = ref(false)
 const doneCount = ref(0)
+/** 用户点「取消」后置位，runConcurrent 不再开新的转换槽 */
+const cancelled = ref(false)
+/** 首个 JPEG 源图的拍摄信息，用于界面展示（可有可无） */
+const exifInfo = ref<ExifInfo | null>(null)
 
 interface ConvertItem {
   id: number
@@ -75,6 +89,14 @@ async function handleFileChange(event: Event) {
 async function processFiles(files: File[]) {
   for (const file of files) {
     const source = await loadImageFromFile(file)
+    if (!exifInfo.value) {
+      // 只在还没读到过拍摄信息时试一次：来自首张 JPEG 源图
+      try {
+        exifInfo.value = await readExifInfo(file)
+      } catch {
+        exifInfo.value = null
+      }
+    }
     items.value.push({
       id: idSeed++,
       source,
@@ -106,29 +128,55 @@ onMounted(() => {
   }
 })
 
+/** 转换单张：批量并发与「重试」共用同一条逻辑 */
+async function convertOne(item: ConvertItem): Promise<void> {
+  try {
+    const result = await convertImageFormat(
+      item.source.bitmap,
+      targetFormat.value,
+      keepMeta.value ? item.file : undefined,
+      targetFormat.value === 'jpeg' ? jpegQuality.value : undefined,
+    )
+    item.result = { blob: result.blob, type: result.type }
+    item.error = undefined
+    setPreviewUrl(item, URL.createObjectURL(result.blob))
+  } catch (error) {
+    item.error = error instanceof Error ? error.message : '转换失败'
+  }
+}
+
 async function runConvert() {
   if (processing.value || items.value.length === 0) return
   processing.value = true
+  cancelled.value = false
   doneCount.value = 0
   try {
-    for (const item of items.value) {
-      try {
-        const result = await convertImageFormat(
-          item.source.bitmap,
-          targetFormat.value,
-          keepMeta.value ? item.file : undefined,
-        )
-        item.result = { blob: result.blob, type: result.type }
-        item.error = undefined
-        setPreviewUrl(item, URL.createObjectURL(result.blob))
-      } catch (error) {
-        item.error = error instanceof Error ? error.message : '转换失败'
-      }
-      doneCount.value++
-    }
+    // 限并发处理：一批图片的编码线程彼此重叠，大批量时进度更快
+    await runConcurrent(
+      items.value.length,
+      3,
+      async (index) => {
+        await convertOne(items.value[index])
+        doneCount.value++
+      },
+      () => cancelled.value,
+    )
   } finally {
     processing.value = false
   }
+}
+
+/** 终止批量转换：正在跑的那一张会跑完，但其后的不再启动 */
+function cancelConvert() {
+  cancelled.value = true
+  showToast('已停止后续转换', 'info')
+}
+
+/** 只重某一张失败的结果，不必重新转换整批 */
+async function retryOne(item: ConvertItem) {
+  if (processing.value) return
+  await convertOne(item)
+  if (item.error) showToast('重试仍未成功', 'error')
 }
 
 function switchFormat(format: OutputFormat) {
@@ -151,6 +199,21 @@ function readyFiles(): File[] {
 
 async function resultFiles(): Promise<File[]> {
   return readyFiles()
+}
+
+/** 转换完的下一步：把第一张成品直送下一个工具 */
+const NEXT_CHAIN: { key: 'compress' | 'grid'; label: string }[] = [
+  { key: 'compress', label: '压体积' },
+  { key: 'grid', label: '切九宫格' },
+]
+
+function onPickNext(key: string) {
+  const first = readyFiles()[0]
+  if (!first || (key !== 'compress' && key !== 'grid')) {
+    if (!first) showToast('还没有可发送的转换结果', 'error')
+    return
+  }
+  emit('navigate', key, first)
 }
 
 async function saveAll() {
@@ -229,6 +292,7 @@ function fallbackDataUrl(source: LoadedImage): string {
       <div v-if="items.length === 0" class="empty-state">
         <div class="empty-icon" v-html="EMPTY_ICON"></div>
         <div>选择一张或多张图片，转换格式</div>
+        <p class="empty-hint">适合批量统一成 JPG / PNG / WebP，跨设备、跨平台都好用</p>
         <div class="empty-actions">
                   <button class="btn btn-primary" style="width: 180px" @click="pickImages">选择图片</button>
                   <button class="btn btn-sample" @click="loadSample">体验示例图</button>
@@ -236,7 +300,48 @@ function fallbackDataUrl(source: LoadedImage): string {
       </div>
 
       <template v-else>
-        <!-- 格式设置 -->
+        <!-- 转换结果：预览置顶，与全站「预览在上、设置在下」保持一致 -->
+        <div class="card">
+          <div class="card-title">转换结果（{{ items.length }} 张）</div>
+          <div v-if="processing" class="progress-wrap">
+            <div class="progress-bar">
+              <div class="progress-inner" :style="{ width: progressPercent + '%' }"></div>
+            </div>
+            <div class="progress-text">
+              转换处理中…（{{ doneCount }}/{{ items.length }}）
+              <button class="retry-mini" @click="cancelConvert">取消</button>
+            </div>
+          </div>
+
+          <div class="item-list">
+            <div v-for="(item, index) in items" :key="item.id" class="item-row">
+              <img :src="previewUrls[index]" :alt="item.source.name" class="item-thumb" />
+              <div class="item-info">
+                <div class="item-name">{{ item.source.name }}</div>
+                <div v-if="item.error" class="item-error">{{ item.error }}</div>
+                <div v-else class="item-types">
+                  <span class="type-chip">{{ formatLabel(item.originalType) }}</span>
+                  <span class="item-arrow">→</span>
+                  <span class="type-chip type-new">{{ formatLabel(item.result?.type ?? '') }}</span>
+                </div>
+              </div>
+              <div class="item-actions">
+                <button
+                  v-if="item.result && !item.error"
+                  class="item-save-btn"
+                  @click="saveOne(item)"
+                >
+                  单张保存
+                </button>
+                <button v-if="item.error" class="item-save-btn retry-item" @click="retryOne(item)">
+                  重试
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 格式设置：目标格式 / 画质等一次性设定，放在预览下方 -->
         <div class="card">
           <div class="card-title">目标格式</div>
           <div class="seg-control">
@@ -259,6 +364,19 @@ function fallbackDataUrl(source: LoadedImage): string {
               @change="runConvert"
             />
           </div>
+          <div v-if="targetFormat === 'jpeg'" class="form-row">
+            <span class="label">画质</span>
+            <input
+              v-model.number="jpegQuality"
+              type="range"
+              min="0.5"
+              max="1"
+              step="0.01"
+              style="flex: 1"
+              @change="runConvert"
+            />
+            <span class="range-value">{{ Math.round(jpegQuality * 100) }}%</span>
+          </div>
           <p class="tip-text">
             JPG 不支持透明背景，透明图片自动填充白色；PNG / WebP 保留透明通道。切换后自动重新转换。
             <template v-if="targetFormat === 'jpeg'">
@@ -268,39 +386,14 @@ function fallbackDataUrl(source: LoadedImage): string {
           </p>
         </div>
 
-        <!-- 转换结果列表 -->
-        <div class="card">
-          <div class="card-title">转换结果（{{ items.length }} 张）</div>
-          <div v-if="processing" class="progress-wrap">
-            <div class="progress-bar">
-              <div class="progress-inner" :style="{ width: progressPercent + '%' }"></div>
-            </div>
-            <div class="progress-text">转换处理中…（{{ doneCount }}/{{ items.length }}）</div>
-          </div>
-
-          <div class="item-list">
-            <div v-for="(item, index) in items" :key="item.id" class="item-row">
-              <img :src="previewUrls[index]" :alt="item.source.name" class="item-thumb" />
-              <div class="item-info">
-                <div class="item-name">{{ item.source.name }}</div>
-                <div v-if="item.error" class="item-error">{{ item.error }}</div>
-                <div v-else class="item-types">
-                  <span class="type-chip">{{ formatLabel(item.originalType) }}</span>
-                  <span class="item-arrow">→</span>
-                  <span class="type-chip type-new">{{ formatLabel(item.result?.type ?? '') }}</span>
-                </div>
-              </div>
-              <button
-                v-if="item.result && !item.error"
-                class="item-save-btn"
-                @click="saveOne(item)"
-              >
-                单张保存
-              </button>
-            </div>
-          </div>
-        </div>
+        <!-- 拍摄信息：读源 JPEG 的 EXIF，仅在能读出字段时展示 -->
+        <ExifPanel :info="exifInfo" />
       </template>
+    </div>
+
+    <!-- 转换完可以把成品直送下一个工具 -->
+    <div v-if="items.some((i) => i.result && !i.error)" class="next-row">
+      <NextTools :options="NEXT_CHAIN" @pick="onPickNext" />
     </div>
 
     <!-- 底部操作栏 -->
@@ -357,6 +450,15 @@ function fallbackDataUrl(source: LoadedImage): string {
 .item-list {
   display: flex;
   flex-direction: column;
+}
+
+/* 画质滑杆右侧数值 */
+.range-value {
+  min-width: 44px;
+  font-size: 12px;
+  color: var(--text-sub);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .item-row {
@@ -447,6 +549,42 @@ function fallbackDataUrl(source: LoadedImage): string {
   transform: scale(0.94);
 }
 
+/* 行内操作按钮排：转换成功显示「单张保存」，失败显示「重试」 */
+.item-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.item-save-btn.retry-item {
+  border-color: rgba(239, 68, 68, 0.3);
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--danger);
+}
+
+/* 进度行与错误行的内联小按钮（取消 / 重试） */
+.retry-mini {
+  margin-left: 8px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--text-sub);
+  font-size: 12px;
+  cursor: pointer;
+  transition: transform 0.15s, background 0.15s, color 0.15s;
+}
+.retry-mini:hover {
+  background: var(--primary-light);
+  color: var(--primary);
+  border-color: color-mix(in srgb, var(--primary) 45%, transparent);
+}
+.retry-mini:active {
+  transform: scale(0.94);
+}
+
 /* PC 宽屏：双栏落位走 .tool-page 默认规则；这一页结果列更宽，所以左窄右宽。列表行 hover 抬升 */
 @media (min-width: 768px) {
   .page-content.tool-page {
@@ -468,5 +606,10 @@ function fallbackDataUrl(source: LoadedImage): string {
     background: rgba(244, 246, 252, 0.8);
     transform: translateY(-2px);
   }
+}
+
+.next-row {
+  margin-top: 14px;
+  padding: 0 2px;
 }
 </style>

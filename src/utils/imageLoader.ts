@@ -6,13 +6,22 @@
  */
 
 import { decodeHeic, isHeicFile, heicErrorMessage } from './heic'
+import { showToast } from './toast'
 
 export interface LoadedImage {
   bitmap: ImageBitmap
   width: number
   height: number
   name: string
+  /** 是否因超大被自动缩小到安全尺寸（内存护栏触发） */
+  downscaled: boolean
 }
+
+/**
+ * 大图内存护栏：单张解码后超过该像素量就先收敛到安全区间再往下走，
+ * 避免超大图在各工具的画布操作里把内存撑爆、卡死页面。绝大多数照片不会触到这个阈值。
+ */
+export const MAX_IMAGE_MEGAPIXELS = 48
 
 /** MIME 说不上话时（Windows 对 HEIC 常给空串）按后缀放行 */
 const IMAGE_EXT = /\.(png|jpe?g|webp|gif|bmp|svg|avif|tiff?|heic|heif|heifs)$/i
@@ -46,11 +55,21 @@ export async function loadImageFromFile(file: File): Promise<LoadedImage> {
     }
   }
 
+  // 大图护栏：超阈值就缩小到安全像素量，避免各工具的画布操作撑爆内存
+  const downscaled = bitmap.width * bitmap.height > MAX_IMAGE_MEGAPIXELS * 1e6
+  if (downscaled) {
+    const reduced = bitmapToCanvas(bitmap)
+    bitmap.close()
+    bitmap = await createImageBitmap(reduced)
+    showToast('图片非常大，已自动缩小到安全尺寸以便稳定处理（不影响大多数使用场景）', 'info')
+  }
+
   return {
     bitmap,
     width: bitmap.width,
     height: bitmap.height,
     name: file.name.replace(/\.[^.]+$/, ''),
+    downscaled,
   }
 }
 
@@ -91,6 +110,26 @@ export function bitmapToCanvas(bitmap: ImageBitmap): HTMLCanvasElement {
   }
   ctx.drawImage(bitmap, 0, 0)
   return canvas
+}
+
+/**
+ * 把原图渲染成一张适合做「前后对比」的预览图（限制长边，避免超大图加载成卡顿）。
+ * 返回 objectURL，调用方负责在合适时机 revoke。
+ */
+export async function createPreviewUrl(bitmap: ImageBitmap, maxEdge = 1400): Promise<string> {
+  const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height))
+  const w = Math.max(1, Math.round(bitmap.width * scale))
+  const h = Math.max(1, Math.round(bitmap.height * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')
+  if (!ctx) {
+    throw new Error('当前浏览器不支持 Canvas 2D')
+  }
+  ctx.drawImage(bitmap, 0, 0, w, h)
+  const blob = await canvasToBlob(canvas, 'image/png', 1)
+  return URL.createObjectURL(blob)
 }
 
 /** canvas → Blob */
@@ -152,10 +191,13 @@ export function downloadBlob(blob: Blob, filename: string): void {
   a.download = filename
   a.style.display = 'none'
   document.body.appendChild(a)
+  const revoke = () => URL.revokeObjectURL(url)
+  // 点击时浏览器已取得 blob URL 引用，可安全释放；但移动端下载面板弹出较慢，多留 3 秒余量
+  a.addEventListener('click', () => setTimeout(revoke, 3000), { once: true })
   a.click()
   document.body.removeChild(a)
-  // 延迟释放，确保下载已触发
-  setTimeout(() => URL.revokeObjectURL(url), 1000)
+  // 万一点击监听没触发（异常路径），5 秒后兜底释放，避免 objectURL 泄漏
+  setTimeout(revoke, 5000)
 }
 
 /** canvas 直接下载（用 toBlob 避免大图转 DataURL 导致内存翻倍） */

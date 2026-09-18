@@ -11,10 +11,17 @@ import {
   type EncodedFormat,
 } from '../utils/imageCompress'
 import { showToast } from '../utils/toast'
+import { usePref } from '../utils/prefs'
+import { runConcurrent } from '../utils/concurrency'
 import { fetchSampleFiles } from '../utils/sampleImage'
 import ShareButton from '../components/ShareButton.vue'
+import NextTools from '../components/NextTools.vue'
 
-const emit = defineEmits<{ back: []; consumed: [] }>()
+const emit = defineEmits<{
+  back: []
+  consumed: []
+  navigate: [view: 'format' | 'grid', file: File]
+}>()
 
 const props = defineProps<{ incomingFile?: File | null }>()
 
@@ -25,15 +32,17 @@ useImageDrop((files) => {
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const items = ref<CompressItem[]>([])
-const mode = ref<'quality' | 'target'>('quality')
+const mode = usePref('compress.mode', 'quality' as 'quality' | 'target')
 /** 输出格式：auto 沿用「透明出 PNG、其余出 JPEG」，WebP 用于同画质再省一档 */
-const format = ref<CompressFormat>('auto')
-const quality = ref(70) // 百分比
-const targetSize = ref(500) // 目标体积（KB）
+const format = usePref<CompressFormat>('compress.format', 'auto')
+const quality = usePref('compress.quality', 70) // 百分比
+const targetSize = usePref('compress.targetSize', 500) // 目标体积（KB）
 const processing = ref(false)
 const doneCount = ref(0)
-const limitMaxSide = ref(false)
-const maxDimension = ref(1920) // 最长边限制（px）
+/** 用户点「取消」后置位，runConcurrent 不再开新的压缩槽 */
+const cancelled = ref(false)
+const limitMaxSide = usePref('compress.limitMaxSide', false)
+const maxDimension = usePref('compress.maxDimension', 1920) // 最长边限制（px）
 
 interface CompressItem {
   id: number
@@ -116,52 +125,77 @@ onMounted(() => {
   }
 })
 
+/** 压缩单张：批量并发与「重试」共用同一条逻辑，结果与错误都落到 item 上 */
+async function compressOne(item: CompressItem): Promise<void> {
+  const maxDim = resolveMaxDimension()
+  try {
+    let result
+    if (mode.value === 'target') {
+      result = await compressToTargetSize(item.source.bitmap, {
+        targetBytes: targetSize.value * 1024,
+        maxDimension: maxDim,
+        format: format.value,
+        metadataFrom: keepMeta.value ? item.file : undefined,
+      })
+      // 命中 PNG 说明是无损输出，体积不可控
+      if (result.format === 'png' && result.blob.size > targetSize.value * 1024) {
+        throw new Error('透明图按体积压缩请选 WebP，或改用按质量模式')
+      }
+    } else {
+      result = await compressBitmap(item.source.bitmap, {
+        quality: quality.value / 100,
+        maxDimension: maxDim,
+        format: format.value,
+        metadataFrom: keepMeta.value ? item.file : undefined,
+      })
+    }
+    item.compressed = {
+      blob: result.blob,
+      format: result.format,
+      width: result.width,
+      height: result.height,
+    }
+    item.compressedSize = result.blob.size
+    item.error = undefined
+    setPreviewUrl(item, URL.createObjectURL(result.blob))
+  } catch (error) {
+    item.error = error instanceof Error ? error.message : '压缩失败'
+  }
+}
+
 /** 重新压缩全部未压缩/已压缩的图片 */
 async function runCompress() {
   if (processing.value || items.value.length === 0) return
   processing.value = true
+  cancelled.value = false
   doneCount.value = 0
   try {
-    const maxDim = resolveMaxDimension()
-    for (const item of items.value) {
-      try {
-        let result
-        if (mode.value === 'target') {
-          result = await compressToTargetSize(item.source.bitmap, {
-            targetBytes: targetSize.value * 1024,
-            maxDimension: maxDim,
-            format: format.value,
-            metadataFrom: keepMeta.value ? item.file : undefined,
-          })
-          // 命中 PNG 说明是无损输出，体积不可控
-          if (result.format === 'png' && result.blob.size > targetSize.value * 1024) {
-            throw new Error('透明图按体积压缩请选 WebP，或改用按质量模式')
-          }
-        } else {
-          result = await compressBitmap(item.source.bitmap, {
-            quality: quality.value / 100,
-            maxDimension: maxDim,
-            format: format.value,
-            metadataFrom: keepMeta.value ? item.file : undefined,
-          })
-        }
-        item.compressed = {
-          blob: result.blob,
-          format: result.format,
-          width: result.width,
-          height: result.height,
-        }
-        item.compressedSize = result.blob.size
-        item.error = undefined
-        setPreviewUrl(item, URL.createObjectURL(result.blob))
-      } catch (error) {
-        item.error = error instanceof Error ? error.message : '压缩失败'
-      }
-      doneCount.value++
-    }
+    // 限并发处理：编码线程彼此重叠，大批量时进度更快、界面也更跟手
+    await runConcurrent(
+      items.value.length,
+      3,
+      async (index) => {
+        await compressOne(items.value[index])
+        doneCount.value++
+      },
+      () => cancelled.value,
+    )
   } finally {
     processing.value = false
   }
+}
+
+/** 终止批量压缩：正在跑的那一张会跑完，但其后的不再启动 */
+function cancelCompress() {
+  cancelled.value = true
+  showToast('已停止后续压缩', 'info')
+}
+
+/** 只重某一张失败的结果，不必重新压缩整批 */
+async function retryOne(item: CompressItem) {
+  if (processing.value) return
+  await compressOne(item)
+  if (item.error) showToast('重试仍未成功', 'error')
 }
 
 /** 实际编码器 → 文件名后缀与 MIME，回退成 PNG 时文件名也不会撒谎 */
@@ -204,6 +238,21 @@ function readyFiles(): File[] {
 
 async function resultFiles(): Promise<File[]> {
   return readyFiles()
+}
+
+/** 压缩完的下一步：把第一张成品送到下一个工具继续处理，不再重新选图 */
+const NEXT_CHAIN: { key: 'format' | 'grid'; label: string }[] = [
+  { key: 'format', label: '转格式' },
+  { key: 'grid', label: '切九宫格' },
+]
+
+function onPickNext(key: string) {
+  const first = readyFiles()[0]
+  if (!first || (key !== 'format' && key !== 'grid')) {
+    if (!first) showToast('还没有可发送的压缩结果', 'error')
+    return
+  }
+  emit('navigate', key, first)
 }
 
 async function saveAll() {
@@ -350,6 +399,25 @@ const totalSaved = computed(() => {
   return original - compressed
 })
 
+/** 已压缩项的原始总量（汇总） */
+const totalOriginal = computed(() =>
+  items.value.reduce((s, it) => (it.compressed ? s + it.originalSize : s), 0),
+)
+
+/** 已压缩项的新总量（汇总） */
+const totalNew = computed(() =>
+  items.value.reduce((s, it) => s + (it.compressedSize ?? 0), 0),
+)
+
+/** 已压缩图片张数 */
+const compressedCount = computed(() => items.value.filter((i) => i.compressed).length)
+
+/** 整体节省百分比 */
+const savePercent = computed(() => {
+  if (totalOriginal.value <= 0) return 0
+  return Math.round((totalSaved.value / totalOriginal.value) * 100)
+})
+
 const previewUrls = computed<string[]>(() =>
   items.value.map((item) => item.previewUrl ?? item.fallbackUrl),
 )
@@ -377,6 +445,7 @@ function fallbackDataUrl(source: LoadedImage): string {
       <div v-if="items.length === 0" class="empty-state">
         <div class="empty-icon" v-html="EMPTY_ICON"></div>
         <div>选择一张或多张图片，本地压缩体积</div>
+        <p class="empty-hint">适合聊天发图前压体积，或大批量缩小再上传</p>
         <div class="empty-actions">
                   <button class="btn btn-primary" style="width: 180px" @click="pickImages">选择图片</button>
                   <button class="btn btn-sample" @click="loadSample">体验示例图</button>
@@ -487,7 +556,10 @@ function fallbackDataUrl(source: LoadedImage): string {
             <div class="progress-bar">
               <div class="progress-inner" :style="{ width: progressPercent + '%' }"></div>
             </div>
-            <div class="progress-text">压缩处理中…（{{ doneCount }}/{{ items.length }}）</div>
+            <div class="progress-text">
+              压缩处理中…（{{ doneCount }}/{{ items.length }}）
+              <button class="retry-mini" @click="cancelCompress">取消</button>
+            </div>
           </div>
 
           <div class="item-list">
@@ -496,29 +568,60 @@ function fallbackDataUrl(source: LoadedImage): string {
               <div class="item-info">
                 <div class="item-name">{{ item.source.name }}</div>
                 <div v-if="item.error" class="item-error">{{ item.error }}</div>
-                <div v-else-if="item.compressed && item.compressedSize !== undefined" class="item-sizes">
-                  <span>{{ formatSize(item.originalSize) }}</span>
-                  <span class="item-arrow">→</span>
-                  <span class="item-new">{{ formatSize(item.compressedSize) }}</span>
-                  <span class="item-percent" :class="{ negative: percentOf(item) < 0 }">
-                    {{ percentOf(item) > 0 ? `-${percentOf(item)}%` : percentOf(item) < 0 ? `+${-percentOf(item)}%` : '0%' }}
-                  </span>
-                  <span class="item-dim">{{ item.compressed.width }}×{{ item.compressed.height }}</span>
-                  <span class="item-dim">{{ formatLabel(item) }}</span>
+                <div v-else-if="item.compressed && item.compressedSize !== undefined">
+                  <div class="item-sizes">
+                    <span>{{ formatSize(item.originalSize) }}</span>
+                    <span class="item-arrow">→</span>
+                    <span class="item-new">{{ formatSize(item.compressedSize) }}</span>
+                    <span class="item-percent" :class="{ negative: percentOf(item) < 0 }">
+                      {{ percentOf(item) > 0 ? `-${percentOf(item)}%` : percentOf(item) < 0 ? `+${-percentOf(item)}%` : '0%' }}
+                    </span>
+                  </div>
+                  <div class="item-meta">
+                    <span class="item-dim">{{ item.source.width }}×{{ item.source.height }}</span>
+                    <span class="item-dim">→ {{ item.compressed.width }}×{{ item.compressed.height }}</span>
+                    <span class="item-dim">· {{ formatLabel(item) }}</span>
+                  </div>
                 </div>
-                <div v-else class="item-sizes">等待压缩…</div>
+                <div v-else class="item-sizes">
+                  等待压缩… <span class="item-dim">{{ formatSize(item.originalSize) }} · {{ item.source.width }}×{{ item.source.height }}</span>
+                </div>
               </div>
-              <button
-                v-if="item.compressed && !item.error"
-                class="item-save-btn"
-                @click="saveOne(item)"
-              >
-                单张保存
-              </button>
+              <div class="item-actions">
+                <button
+                  v-if="item.compressed && !item.error"
+                  class="item-save-btn"
+                  @click="saveOne(item)"
+                >
+                  单张保存
+                </button>
+                <button
+                  v-if="item.error"
+                  class="item-save-btn retry-item"
+                  @click="retryOne(item)"
+                >
+                  重试
+                </button>
+              </div>
             </div>
           </div>
 
-          <p v-if="totalSaved > 0" class="tip-text">共节省 {{ formatSize(totalSaved) }}。透明 PNG 为无损格式，压缩幅度有限。</p>
+          <div v-if="compressedCount > 0" class="summary-bar">
+            <span class="summary-label">总大小</span>
+            <span>{{ formatSize(totalOriginal) }}</span>
+            <span class="summary-arrow">→</span>
+            <span class="summary-new">{{ formatSize(totalNew) }}</span>
+            <span class="summary-save">
+              节省 {{ formatSize(totalSaved) }}<template v-if="savePercent > 0"> · {{ savePercent }}%</template>
+            </span>
+          </div>
+
+          <p v-if="totalSaved > 0 && compressedCount > 0" class="tip-text">透明 PNG 为无损格式，压缩幅度有限。</p>
+        </div>
+
+        <!-- 压缩完可以把成品直送下一个工具，省一次选图 -->
+        <div v-if="items.some((i) => i.compressed && !i.error)" class="next-row">
+          <NextTools :options="NEXT_CHAIN" @pick="onPickNext" />
         </div>
       </template>
     </div>
@@ -622,10 +725,30 @@ function fallbackDataUrl(source: LoadedImage): string {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.item-sizes > * {
+  white-space: nowrap;
 }
 
 .item-arrow {
   color: #c4c9d4;
+}
+
+/* 压缩结果里的次要信息行：尺寸、格式等，比主信息更淡 */
+.item-meta {
+  margin-top: 3px;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.item-meta .item-dim {
+  font-size: 12px;
 }
 
 .item-new {
@@ -646,6 +769,39 @@ function fallbackDataUrl(source: LoadedImage): string {
   margin-top: 2px;
   font-size: 13px;
   color: var(--danger);
+}
+
+/* 总量汇总栏：压缩后一屏看清压了多少、省了多少 */
+.summary-bar {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--gradient-soft);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.summary-label {
+  color: var(--text-sub);
+  margin-right: 2px;
+}
+.summary-arrow {
+  color: #c4c9d4;
+}
+.summary-new {
+  color: var(--success);
+  font-weight: 700;
+}
+.summary-save {
+  margin-left: auto;
+  color: var(--success);
+  font-weight: 600;
+  background: rgba(16, 185, 129, 0.12);
+  padding: 2px 10px;
+  border-radius: 999px;
 }
 
 .item-dim {
@@ -672,6 +828,42 @@ function fallbackDataUrl(source: LoadedImage): string {
   transform: scale(0.94);
 }
 
+/* 行内操作按钮排：压缩成功显示「单张保存」，失败显示「重试」，多张时也能并列收下 */
+.item-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.item-save-btn.retry-item {
+  border-color: rgba(239, 68, 68, 0.3);
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--danger);
+}
+
+/* 进度行与错误行的内联小按钮（取消 / 重试） */
+.retry-mini {
+  margin-left: 8px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--text-sub);
+  font-size: 12px;
+  cursor: pointer;
+  transition: transform 0.15s, background 0.15s, color 0.15s;
+}
+.retry-mini:hover {
+  background: var(--primary-light);
+  color: var(--primary);
+  border-color: color-mix(in srgb, var(--primary) 45%, transparent);
+}
+.retry-mini:active {
+  transform: scale(0.94);
+}
+
 /* PC 宽屏：双栏落位走 .tool-page 默认规则；这一页结果列更宽，所以左窄右宽。结果项 hover 抬升 */
 @media (min-width: 768px) {
   .page-content.tool-page {
@@ -693,5 +885,11 @@ function fallbackDataUrl(source: LoadedImage): string {
     background: rgba(244, 246, 252, 0.8);
     transform: translateY(-2px);
   }
+}
+
+/* 压缩结果 -> 下一个工具 的一行入口，与卡片拉开一点距离 */
+.next-row {
+  margin-top: 14px;
+  padding: 0 2px;
 }
 </style>

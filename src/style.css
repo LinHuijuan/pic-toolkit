@@ -99,7 +99,7 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: calc(10px + env(safe-area-inset-top)) 12px 10px;
+  padding: calc(4px + env(safe-area-inset-top)) 12px 4px;
   background: rgba(255, 255, 255, 0.82);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
@@ -122,13 +122,13 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: 30px;
+  height: 30px;
   border: none;
   border-radius: 50%;
   background: var(--gradient-soft);
   color: var(--primary);
-  font-size: 20px;
+  font-size: 17px;
   font-weight: 600;
   cursor: pointer;
   flex-shrink: 0;
@@ -146,8 +146,8 @@ body {
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
-  max-width: calc(100% - 104px);
-  font-size: 17px;
+  max-width: calc(100% - 92px);
+  font-size: 15px;
   font-weight: 600;
   text-align: center;
   white-space: nowrap;
@@ -289,7 +289,7 @@ body {
   position: sticky;
   bottom: 0;
   width: 100%;
-  padding: 12px 16px calc(12px + var(--safe-bottom));
+  padding: 6px 12px calc(6px + var(--safe-bottom));
   background: rgba(255, 255, 255, 0.88);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
@@ -297,6 +297,12 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+/* 底部操作栏内按钮更紧凑：压低按钮高度，少占屏 */
+.bottom-bar .btn {
+  padding-block: 7px;
+  font-size: 13px;
 }
 
 /* basis 0 + 不换行：等分可用宽度，只有文字真的排不下时才整颗按钮换到第二行
@@ -729,6 +735,17 @@ input[type='range']::-moz-range-track {
   line-height: 1.6;
 }
 
+/* 空状态场景短建议：弱化的补充说明，只在主文案下面放一行，不喧宾夺主 */
+.empty-hint {
+  font-size: 12.5px;
+  color: var(--text-sub);
+  opacity: 0.7;
+  line-height: 1.6;
+  max-width: 320px;
+  text-align: center;
+  margin-top: -4px;
+}
+
 /* 前后对比：整块占满卡片，内部尺寸由 CompareSlider 自己按图片比例决定 */
 .compare-wrap {
   width: 100%;
@@ -853,6 +870,50 @@ input[type='range']::-moz-range-track {
   }
 }
 
+/* ===== 交互触感增强：桌面指针设备的 hover 提升 + 结果操作区收敛渐显 =====
+   触屏没有 hover（且会把最后一次点击态粘在元素上），所以全部包在 hover:hover 里，
+   只在真实指针设备生效，触屏保持原先的常显与按压反馈。 */
+@media (hover: hover) {
+  /* 主按钮 hover 微抬升 + 阴影加深，给人"可点"的暗示 */
+  .btn-primary:not(:disabled):hover {
+    transform: translateY(-1px);
+    box-shadow: 0 9px 22px color-mix(in srgb, var(--primary) 42%, transparent);
+  }
+  .btn-ghost:not(:disabled):hover,
+  .btn-outline:not(:disabled):hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(31, 41, 55, 0.08);
+  }
+  /* 分段项（seg-item）hover 描边显亮，与选中态区分但不抢眼 */
+  .seg-control .seg-item:not(.active):hover {
+    border-color: color-mix(in srgb, var(--primary) 45%, transparent);
+    color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 6%, #fff);
+  }
+  /* 色点 hover 轻微放大 */
+  .color-dot:not(.active):hover {
+    transform: scale(1.12);
+  }
+  /* 结果行操作区默认收敛，hover / 键盘聚焦时渐显：安静时不喧宾夺主 */
+  .item-row .item-actions {
+    opacity: 0.55;
+    transition: opacity 0.2s ease;
+  }
+  .item-row:hover .item-actions,
+  .item-row:focus-within .item-actions {
+    opacity: 1;
+  }
+}
+
+/* 复选框统一按压触感（各类设置项都用原生 checkbox，桌面可拖动占比小，触屏带 :active 反馈） */
+input[type='checkbox'] {
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+input[type='checkbox']:active {
+  transform: scale(0.92);
+}
+
 /* ===== 尊重系统的"减少动态效果"：全站兜底 ===== */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -867,6 +928,10 @@ input[type='range']::-moz-range-track {
   /* 位移型反馈在晕动症下最难受，直接取消；显隐类保留可读性 */
   .card:hover,
   .btn:active,
+  .btn-primary:hover,
+  .btn-ghost:hover,
+  .btn-outline:hover,
+  .color-dot:not(.active):hover,
   .top-bar .back-btn:active {
     transform: none !important;
   }
@@ -876,4 +941,97 @@ input[type='range']::-moz-range-track {
   .home-header::after {
     animation: none !important;
   }
+}
+
+/* ===== 通用：预览标题右上角的紧凑图标按钮（撤销/重做/恢复原图等） ===== */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-page);
+  color: var(--text-sub);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, transform 0.12s;
+  flex-shrink: 0;
+}
+
+.icon-btn:active {
+  transform: scale(0.9);
+}
+
+.icon-btn:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.icon-btn:hover:not(:disabled) {
+  color: var(--primary);
+  border-color: color-mix(in srgb, var(--primary) 50%, transparent);
+}
+
+.icon-btn.danger {
+  color: var(--danger);
+}
+
+.icon-btn.danger:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 50%, transparent);
+}
+
+/* 历史/叠加操作按钮组：与预览标题同排，靠右对齐 */
+.edit-history-actions {
+  display: inline-flex;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* 通用：方向操作，一行三个图标+文字小按钮 */
+.dir-actions {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.dir-btn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 7px 4px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--bg-page);
+  color: var(--text-sub);
+  cursor: pointer;
+  transition: transform 0.12s, border-color 0.15s;
+}
+
+.dir-btn:active {
+  transform: scale(0.95);
+}
+
+.dir-btn:hover:not(:disabled) {
+  color: var(--primary);
+  border-color: color-mix(in srgb, var(--primary) 50%, transparent);
+}
+
+.dir-icon {
+  font-size: 17px;
+  line-height: 1;
+}
+
+.dir-txt {
+  font-size: 11px;
 }

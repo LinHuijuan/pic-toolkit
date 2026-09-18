@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { ref, computed } from 'vue'
 import { prepareAiModel, aiModel } from '../utils/aiModel'
 import { formatDuration } from '../utils/format'
+import FeedbackWidget from '../components/FeedbackWidget.vue'
+import RecentWidget from '../components/RecentWidget.vue'
 
 /** 工具标识：与 hash 路由的 #/工具名 一一对应 */
 type ToolKey =
@@ -17,12 +19,13 @@ type ToolKey =
   | 'upscale'
   | 'beauty'
   | 'colorReplace'
+  | 'exif'
 
 /** 分组标识：按"用户想完成的事"分，而不是按技术能力分 */
 type GroupKey = 'featured' | 'social' | 'portrait' | 'file'
 
 const emit = defineEmits<{
-  navigate: [view: ToolKey]
+  navigate: [view: ToolKey | 'privacy']
 }>()
 
 /** 按设备显示 PWA 安装提示：移动端引导添加到主屏幕，PC 端引导浏览器安装 */
@@ -36,8 +39,8 @@ function startPreload() {
 /** 一行内说清"要不要等、下完了吗、还要多久"；文案过长时靠省略号收尾 */
 const aiStatusText = computed(() => {
   const m = aiModel
-  if (m.stage === 'idle') return '抠图、证件照用到 42MB AI 模型，下一次离线可用'
-  if (m.stage === 'ready') return 'AI 模型已就绪，抠图与证件照打开即用'
+  if (m.stage === 'idle') return '抠图、证件照需 84MB 高清模型'
+  if (m.stage === 'ready') return 'AI 模型已就绪，打开即用'
   if (m.stage === 'error') return m.message || '模型下载失败，可重试或进工具页再试'
   const size = m.totalMB > 0 ? `${m.loadedMB.toFixed(1)}/${m.totalMB.toFixed(1)}MB` : `${m.loadedMB.toFixed(1)}MB`
   const remain = m.remainingSeconds != null ? ` · 约再 ${formatDuration(m.remainingSeconds * 1000)}` : ''
@@ -61,7 +64,7 @@ const features: ToolCard[] = [
     key: 'removeBg' as const,
     title: 'AI 抠图',
     desc: '一键去背景并收边去白边，换底色、加描边做贴纸，还能手动擦残留',
-    badge: '首次需下载 42MB',
+    badge: '首次需下载 84MB 高清模型',
     grad: ['#34d399', '#22c55e'] as const,
     iconBody: '<circle cx="6.5" cy="6.5" r="2.8"/><circle cx="6.5" cy="17.5" r="2.8"/><path d="M8.8 8.2 20.5 20M8.8 15.8 20.5 4"/>',
     group: 'featured' as const,
@@ -70,7 +73,7 @@ const features: ToolCard[] = [
     key: 'idPhoto' as const,
     title: '证件照换底色',
     desc: 'AI 抠图一键换底，内置常见规格预设，支持一版多张打印',
-    badge: '复用同一 42MB 模型',
+    badge: '复用同一 84MB 高清模型',
     grad: ['#c084fc', '#d946ef'] as const,
     iconBody: '<rect x="3.5" y="4.5" width="17" height="15" rx="3"/><circle cx="12" cy="10.5" r="2.8"/><path d="M7.5 17.5c.9-2 2.6-3 4.5-3s3.6 1 4.5 3"/>',
     group: 'featured' as const,
@@ -157,13 +160,21 @@ const features: ToolCard[] = [
     iconBody: '<path d="M20.5 12a8.5 8.5 0 0 1-14.8 5.7M3.5 12a8.5 8.5 0 0 1 14.8-5.7"/><path d="M20.5 3.5v5h-5M3.5 20.5v-5h5"/>',
     group: 'file' as const,
   },
+  {
+    key: 'exif' as const,
+    title: 'EXIF 信息',
+    desc: '查看拍摄设备、时间与位置，公开前可一键清除',
+    grad: ['#a78bfa', '#8b5cf6'] as const,
+    iconBody: '<rect x="4" y="3.5" width="16" height="17" rx="2.5"/><path d="M8 8h8M8 12h8M8 16h5"/>',
+    group: 'file' as const,
+  },
 ]
 
 /** 分组标题：说清这一组能帮用户完成什么 */
 const groups: { key: GroupKey; title: string }[] = [
   { key: 'social' as const, title: '做社媒图' },
   { key: 'portrait' as const, title: '修人像、救糊图' },
-  { key: 'file' as const, title: '压体积、换格式' },
+  { key: 'file' as const, title: '压体积、查信息、转格式' },
 ]
 
 /** 精选工具排成整行大卡，其余按组进双列宫格 */
@@ -173,10 +184,54 @@ function toolsOf(key: GroupKey) {
   return features.filter((f) => f.group === key && f.group !== ('featured' as const))
 }
 
+/** 卡片角标：抠图 / 证件照共用同一枚 84MB 高清模型，已就绪后就不再提示「首次需下载」 */
+function effectiveBadge(item: ToolCard): string | undefined {
+  if ((item.key === 'removeBg' || item.key === 'idPhoto') && aiModel.stage === 'ready') return undefined
+  return item.badge
+}
+
 /** 组装带独立渐变描边的图标 SVG（每个卡片引用自己的渐变 id） */
 function iconSvg(item: ToolCard): string {
   const gid = `grad-${item.key}`
   return `<svg viewBox="0 0 24 24" fill="none" stroke="url(#${gid})" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${item.iconBody}</svg>`
+}
+
+/* ---------- 工具搜索：按「想做成的事」找工具，而不是记住 13 个入口 ---------- */
+const searchInput = ref('')
+
+/** 每个工具的通俗说法 / 常见任务词，命中「我要压缩图片」这种口语也能找到对应工具 */
+const SEARCH_ALIASES: Record<string, string[]> = {
+  removeBg: ['抠图', '去背景', '去底', '去白边', '透明', '贴纸', '换背景'],
+  idPhoto: ['证件照', '一寸', '二寸', '报名照', '登记照', '换底色', '护照'],
+  grid: ['九宫格', '朋友圈', '切图', '发圈', '九张', '宫格'],
+  watermark: ['水印', '加水印', '防盗', '署名', '版权', 'logo'],
+  collage: ['拼图', '网格', '长图', '九拼', '多张'],
+  merge: ['长图', '拼接', '聊天截图', '纵向', '竖排'],
+  edit: ['裁剪', '旋转', '翻转', '编辑', '裁方'],
+  beauty: ['美颜', '磨皮', '人像', '提亮', '修图', '美白'],
+  upscale: ['超分', '放大', '清晰', '变高清', '修复', '模糊'],
+  colorReplace: ['改色', '换色', '局部', '换logo颜色'],
+  compress: ['压缩', '变小', '压体积', '省空间', '省内存', 'kb'],
+  format: ['格式', '转换', 'png', 'jpg', 'webp', 'heic', 'iphone'],
+  exif: ['exif', '拍摄信息', '位置', 'gps', '隐私', '元数据'],
+}
+
+const normalizedQuery = computed(() => searchInput.value.trim().toLowerCase())
+
+const searchResults = computed<ToolCard[]>(() => {
+  const q = normalizedQuery.value
+  if (!q) return []
+  const hit = (item: ToolCard) => {
+    if (item.title.toLowerCase().includes(q)) return true
+    if (item.desc.toLowerCase().includes(q)) return true
+    return (SEARCH_ALIASES[item.key] ?? []).some((w) => w.toLowerCase().includes(q))
+  }
+  return features.filter(hit)
+})
+
+function pickSearch(key: ToolKey) {
+  searchInput.value = ''
+  emit('navigate', key)
 }
 </script>
 
@@ -193,7 +248,7 @@ function iconSvg(item: ToolCard): string {
         </svg>
       </div>
       <h1 class="home-title">图片不用上传，就能抠图、换底色、切九宫格</h1>
-      <p class="home-subtitle">12 个工具在你这台设备里跑完 · 不注册、不上传、打开即用</p>
+      <p class="home-subtitle">13 个工具在你这台设备里跑完 ·<br class="home-subtitle-br" />不注册、不上传、打开即用</p>
 
       <div class="hero-status" :class="'hero-status--' + aiModel.stage">
         <span class="hero-status-icon">{{ aiModel.stage === 'ready' ? '✓' : aiModel.stage === 'error' ? '!' : '⚡' }}</span>
@@ -207,8 +262,73 @@ function iconSvg(item: ToolCard): string {
       </div>
     </div>
 
+    <!-- 隐私信任标识：一行低调徽标，把「本地处理、不上传」这个核心卖点讲透，不上传即最放心的省 -->
+    <div class="trust-bar">
+      <span class="trust-chip">
+        <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="M12 3.5 5 6v5c0 4.4 2.9 8.2 7 9.5 4.1-1.3 7-5.1 7-9.5V6l-7-2.5Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="m9 11.5 2.2 2.2L15.5 9.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        全本地处理
+      </span>
+      <span class="trust-chip">
+        <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4" y="10" width="16" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 10V4M8 7.5 12 4l4 3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        图片不上传
+      </span>
+      <span class="trust-chip">
+        <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><circle cx="12" cy="8" r="3.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5.5 20c.9-3.2 3.4-5 6.5-5s5.6 1.8 6.5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        无需注册
+      </span>
+    </div>
+
+    <!-- 工具搜索：想做什么直接输入，不必先认清 13 个入口 -->
+    <div class="tool-search">
+      <svg class="tool-search-icon" viewBox="0 0 24 24" aria-hidden="true" width="16" height="16"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m16 16 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      <input
+        v-model="searchInput"
+        class="tool-search-input"
+        type="search"
+        placeholder="找工具：压体积、抠图、切九宫格…"
+        aria-label="搜索工具"
+      />
+    </div>
+    <div v-if="normalizedQuery" class="search-results">
+      <template v-if="searchResults.length">
+        <a
+          v-for="item in searchResults"
+          :key="item.key"
+          class="search-result"
+          :href="'#/' + item.key"
+          @click.prevent="pickSearch(item.key)"
+        >
+          <span class="search-result-icon" v-html="iconSvg(item)"></span>
+          <span class="search-result-body">
+            <span class="search-result-title">{{ item.title }}</span>
+            <span class="search-result-desc">{{ item.desc }}</span>
+          </span>
+          <span class="search-result-arrow" aria-hidden="true">›</span>
+        </a>
+      </template>
+      <p v-else class="search-empty">没有匹配的工具，换个说法试试，比如「压体积」或「换底色」</p>
+    </div>
+
+    <!-- 一键接力：把常见的一条龙步骤做成可点的入口，弱化「找工具、换页面」的割裂感 -->
+    <section v-show="!normalizedQuery" class="flow-strip">
+      <div class="flow-title">常见一条龙 · 图片全程留在本机</div>
+      <div class="flow-steps">
+        <a class="flow-step" href="#/compress" @click.prevent="emit('navigate', 'compress')">
+          <b>压缩体积</b><span>变小更好传</span>
+        </a>
+        <span class="flow-arrow" aria-hidden="true">›</span>
+        <a class="flow-step" href="#/format" @click.prevent="emit('navigate', 'format')">
+          <b>转换格式</b><span>兼容各端</span>
+        </a>
+        <span class="flow-arrow" aria-hidden="true">›</span>
+        <a class="flow-step" href="#/grid" @click.prevent="emit('navigate', 'grid')">
+          <b>切图发布</b><span>发圈装饰</span>
+        </a>
+      </div>
+    </section>
+
     <!-- 入口分两层：先用整行大卡给出三个"最值得试"的，其余按意图分组 -->
-    <section class="tool-group">
+    <section v-show="!normalizedQuery" class="tool-group">
       <h2 class="group-title">效果最直观的 3 个</h2>
       <div class="featured-list">
         <a
@@ -223,7 +343,7 @@ function iconSvg(item: ToolCard): string {
           <div class="feature-info">
             <div class="feature-title">
               {{ item.title }}
-              <span v-if="item.badge" class="feature-badge">{{ item.badge }}</span>
+              <span v-if="effectiveBadge(item)" class="feature-badge">{{ effectiveBadge(item) }}</span>
             </div>
             <div class="feature-desc">{{ item.desc }}</div>
           </div>
@@ -232,7 +352,7 @@ function iconSvg(item: ToolCard): string {
       </div>
     </section>
 
-    <section v-for="group in groups" :key="group.key" class="tool-group">
+    <section v-for="group in groups" v-show="!normalizedQuery" :key="group.key" class="tool-group">
       <h2 class="group-title">{{ group.title }}</h2>
       <div class="feature-list">
         <a
@@ -247,7 +367,7 @@ function iconSvg(item: ToolCard): string {
           <div class="feature-info">
             <div class="feature-title">
               {{ item.title }}
-              <span v-if="item.badge" class="feature-badge">{{ item.badge }}</span>
+              <span v-if="effectiveBadge(item)" class="feature-badge">{{ effectiveBadge(item) }}</span>
             </div>
             <div class="feature-desc">{{ item.desc }}</div>
           </div>
@@ -255,11 +375,19 @@ function iconSvg(item: ToolCard): string {
       </div>
     </section>
 
+    <!-- 底部功能入口：收进页面流内，不悬浮、不遮挡内容 -->
+    <div class="footer-util">
+      <RecentWidget />
+      <FeedbackWidget />
+    </div>
+
     <!-- 底部说明（按设备显示安装提示） -->
     <p class="tip-text footer-tip">
       {{ isMobile
         ? '提示：本工具为 PWA 应用，可在浏览器菜单中「添加到主屏幕」，使用体验更接近原生 App。'
         : '提示：本工具为 PWA 应用，可在浏览器地址栏点击安装图标（或安装提示），安装为桌面应用使用。' }}
+      <span class="footer-sep"> · </span>
+      <a href="#/privacy" @click.prevent="emit('navigate', 'privacy')" class="footer-link">隐私说明</a>
     </p>
     <!-- 每张功能卡片独立的渐变定义（图标描边引用各自 id） -->
     <svg width="0" height="0" style="position: absolute" aria-hidden="true">
@@ -290,6 +418,12 @@ function iconSvg(item: ToolCard): string {
   flex-direction: column;
   gap: 16px;
   padding-top: 20px;
+}
+
+/* 首屏各区块（hero / trust / 分组）都是 flex 纵向排列的块级子项，默认 min-width:auto
+  会把某段长内容的 min-content 带进布局，窄屏时横向撑破。统一放行收缩 */
+.home-page > * {
+  min-width: 0;
 }
 
 /* 背景氛围光斑：柔和的多色 radial 光晕，打破"全是紫色"，PC 满宽更有层次不空旷 */
@@ -409,8 +543,9 @@ function iconSvg(item: ToolCard): string {
 }
 
 .home-subtitle {
-  margin-top: 6px;
+  margin-top: 8px;
   font-size: 13px;
+  line-height: 1.6;
   color: rgba(255, 255, 255, 0.85);
   position: relative;
   z-index: 1;
@@ -500,6 +635,146 @@ function iconSvg(item: ToolCard): string {
   bottom: 0;
 }
 
+/* 隐私信任标识：一行小徽标，低调不抢视觉焦点 */
+.trust-bar {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 2px;
+}
+
+.trust-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-sub);
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.7);
+  line-height: 1.3;
+}
+
+.trust-chip svg {
+  flex-shrink: 0;
+  color: color-mix(in srgb, #4f6ef7 70%, transparent);
+}
+
+/* 工具搜索：白底胶囊输入框，低调不抢工具卡片 */
+.tool-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: #fff;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-card, 0 1px 2px rgba(31, 41, 55, 0.04));
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.tool-search:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 14%, transparent);
+}
+
+.tool-search-icon {
+  flex-shrink: 0;
+  color: var(--text-sub);
+}
+
+.tool-search-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-size: 14px;
+  color: var(--text-main);
+  font-family: inherit;
+}
+
+.tool-search-input::placeholder {
+  color: var(--text-sub);
+}
+
+/* 搜索结果：卡片列表，与功能卡同一圆角语言 */
+.search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.search-result {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  box-shadow: var(--shadow-card);
+  color: inherit;
+  text-decoration: none;
+  animation: feature-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+.search-result:active {
+  transform: scale(0.98);
+}
+
+.search-result-icon {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--card-from, #4f6ef7) 14%, #fff), color-mix(in srgb, var(--card-to, #4f6ef7) 22%, #fff));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.search-result-icon :deep(svg) {
+  width: 20px;
+  height: 20px;
+}
+
+.search-result-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.search-result-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.search-result-desc {
+  font-size: 12px;
+  color: var(--text-sub);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-result-arrow {
+  flex-shrink: 0;
+  font-size: 20px;
+  color: color-mix(in srgb, var(--card-to, #4f6ef7) 70%, transparent);
+}
+
+.search-empty {
+  margin: 4px 0 0;
+  padding: 6px 4px;
+  font-size: 13px;
+  color: var(--text-sub);
+}
+
 /* 分组标题 */
 .tool-group {
   display: flex;
@@ -516,7 +791,9 @@ function iconSvg(item: ToolCard): string {
 
 .feature-list {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  /* minmax(0,1fr)：grid track 默认 min 为 auto，卡片里的长文案/图标会把列宽顶破，
+     窄屏下一半就超出视口。强制列宽可收缩到 0，由视口说了算 */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -577,6 +854,78 @@ function iconSvg(item: ToolCard): string {
   font-size: 24px;
   line-height: 1;
   color: color-mix(in srgb, var(--card-to) 70%, transparent);
+}
+
+/* 一键接力：一条扁平的步骤链，窄屏自动换行也不破坏节奏 */
+.flow-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px dashed color-mix(in srgb, var(--primary) 35%, transparent);
+}
+
+.flow-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-sub);
+  padding-left: 2px;
+}
+
+.flow-steps {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.flow-step {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: #fff;
+  border: 1px solid var(--border);
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+  min-width: 0;
+}
+
+.flow-step:hover {
+  border-color: var(--primary);
+  box-shadow: 0 4px 14px rgba(79, 110, 247, 0.12);
+  transform: translateY(-1px);
+}
+
+.flow-step:active {
+  transform: translateY(0);
+}
+
+.flow-step b {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.flow-step span {
+  font-size: 11px;
+  color: var(--text-sub);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.flow-arrow {
+  flex-shrink: 0;
+  font-size: 18px;
+  color: color-mix(in srgb, var(--primary) 60%, transparent);
+  line-height: 1;
 }
 
 /* 渐变描边：默认隐藏，hover 时沿卡片边缘亮起一张彩色描边 */
@@ -670,6 +1019,10 @@ function iconSvg(item: ToolCard): string {
 
 /* PC：宫格放宽 + hover 抬升 */
 @media (min-width: 768px) {
+  .home-subtitle-br {
+    display: none;
+  }
+
   .home-title {
     font-size: 26px;
   }
@@ -726,5 +1079,28 @@ function iconSvg(item: ToolCard): string {
 
 .footer-tip {
   text-align: center;
+}
+
+.footer-sep {
+  color: var(--border);
+}
+
+.footer-link {
+  color: var(--primary);
+  text-decoration: none;
+  border-bottom: 1px dashed color-mix(in srgb, var(--primary) 50%, transparent);
+}
+
+.footer-link:hover {
+  border-bottom-style: solid;
+}
+
+/* 底部功能入口：与说明文字并列，浅色、不抢眼 */
+.footer-util {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
 }
 </style>

@@ -12,9 +12,22 @@ import {
 import { showToast } from '../utils/toast'
 import { fetchSampleFile } from '../utils/sampleImage'
 import ShareButton from '../components/ShareButton.vue'
+import NextTools from '../components/NextTools.vue'
 
-const emit = defineEmits<{ back: []; consumed: [] }>()
+const emit = defineEmits<{
+  back: []
+  consumed: []
+  navigate: [view: 'compress' | 'format' | 'edit' | 'grid', file: File]
+}>()
 const props = defineProps<{ incomingFile?: File | null }>()
+
+/** 改色完成直送下一步：压缩体积 / 转格式 / 继续编辑 / 切九宫格 */
+const NEXT_CHAIN: { key: 'compress' | 'format' | 'edit' | 'grid'; label: string }[] = [
+  { key: 'compress', label: '压体积' },
+  { key: 'format', label: '转格式' },
+  { key: 'edit', label: '继续编辑' },
+  { key: 'grid', label: '切九宫格' },
+]
 
 useImageDrop((files) => {
   if (files[0]) processFile(files[0])
@@ -57,64 +70,104 @@ const rectStyle = computed<CSSProperties>(() => ({
 
 const stageCursor = computed(() => (picker.value ? 'crosshair' : 'default'))
 
-/** 撤销 / 重做历史快照 */
-interface Snapshot {
+/** 一步改色（区域 + 源色→目标色 + 容差） */
+interface Step {
   rect: ReplaceRect
   fromHex: string
   toHex: string
   tolerance: number
 }
-const history = ref<Snapshot[]>([])
-const historyIndex = ref(-1)
-const canUndo = computed(() => historyIndex.value > 0)
-const canRedo = computed(() => historyIndex.value < history.value.length - 1)
 
-function snapshot(): Snapshot {
-  return { rect: { ...rect.value }, fromHex: fromHex.value, toHex: toHex.value, tolerance: tolerance.value }
+/** 已「应用」的改色步骤：从原图开始依次叠加 —— 支持连续多次改色 */
+const steps = ref<Step[]>([])
+/** 是否正处在一步编辑草稿中（拖动选框 / 改色 / 取色 / 调容差），草稿即时反映到预览但不落定 */
+const draft = ref(false)
+/** 撤销弹出的步骤，供重做 */
+const redoStack = ref<Step[]>([])
+
+const canUndo = computed(() => steps.value.length > 0)
+const canRedo = computed(() => redoStack.value.length > 0)
+
+function currentParams(): Step {
+  return {
+    rect: { ...rect.value },
+    fromHex: fromHex.value,
+    toHex: toHex.value,
+    tolerance: tolerance.value,
+  }
 }
 
-function pushSnapshot() {
-  const snap = snapshot()
-  const last = history.value[historyIndex.value]
-  if (last && JSON.stringify(last) === JSON.stringify(snap)) return
-  history.value = history.value.slice(0, historyIndex.value + 1)
-  history.value.push(snap)
-  historyIndex.value = history.value.length - 1
-}
-
-function applySnapshot(snap: Snapshot) {
-  rect.value = { ...snap.rect }
-  fromHex.value = snap.fromHex
-  toHex.value = snap.toHex
-  tolerance.value = snap.tolerance
-  rebuild()
-}
-
-function undo() {
-  if (!canUndo.value) return
-  historyIndex.value--
-  applySnapshot(history.value[historyIndex.value])
-}
-
-function redo() {
-  if (!canRedo.value) return
-  historyIndex.value++
-  applySnapshot(history.value[historyIndex.value])
-}
-
-/** 按当前参数生成结果画布 */
+/** 预览结果 = 原图顺次叠加已应用步骤，末尾（若在编辑草稿中）再叠加当前参数 */
 function buildResult(): HTMLCanvasElement | null {
   if (!baseCanvas) return null
-  return replaceColorInRegion(baseCanvas, rect.value, {
-    from: hexToRgb(fromHex.value),
-    to: hexToRgb(toHex.value),
-    tolerance: tolerance.value,
-  })
+  let cv: HTMLCanvasElement = baseCanvas
+  for (const s of steps.value) {
+    cv = replaceColorInRegion(cv, s.rect, {
+      from: hexToRgb(s.fromHex),
+      to: hexToRgb(s.toHex),
+      tolerance: s.tolerance,
+    })
+  }
+  if (draft.value) {
+    const cur = currentParams()
+    cv = replaceColorInRegion(cv, cur.rect, {
+      from: hexToRgb(cur.fromHex),
+      to: hexToRgb(cur.toHex),
+      tolerance: cur.tolerance,
+    })
+  }
+  return cv
 }
 
 function rebuild() {
   resultCanvas = buildResult()
   renderPreview()
+}
+
+/** 开始编辑下一步草稿，让改动即时生效到预览 */
+function beginDraft() {
+  draft.value = true
+  rebuild()
+}
+
+/** 把当前草稿落定为一步；重置选框，方便继续改下一块颜色 */
+function applyCurrent() {
+  if (!source.value) return
+  steps.value.push(currentParams())
+  redoStack.value = []
+  rect.value = { x: 0.25, y: 0.25, w: 0.5, h: 0.5 }
+  draft.value = false
+  rebuild()
+  showToast('已应用这步改色，可继续改下一块', 'success')
+}
+
+/** 撤销：先放弃未应用的草稿，再逐层回退已应用步骤 */
+function undo() {
+  if (draft.value) {
+    draft.value = false
+    const last = steps.value[steps.value.length - 1]
+    if (last) {
+      rect.value = { ...last.rect }
+      fromHex.value = last.fromHex
+      toHex.value = last.toHex
+      tolerance.value = last.tolerance
+    } else {
+      rect.value = { x: 0.25, y: 0.25, w: 0.5, h: 0.5 }
+    }
+    rebuild()
+    return
+  }
+  if (!canUndo.value) return
+  redoStack.value.push(steps.value.pop() as Step)
+  rebuild()
+}
+
+function redo() {
+  if (!canRedo.value) return
+  const s = redoStack.value.pop() as Step
+  steps.value.push(s)
+  draft.value = false
+  rebuild()
 }
 
 /** 绘制预览（按预览上限等比缩放） */
@@ -142,10 +195,11 @@ async function processFile(file: File) {
   tolerance.value = 25
   picker.value = null
   await nextTick()
-  history.value = []
-  historyIndex.value = -1
+  steps.value = []
+  redoStack.value = []
+  // 载入后预览即展示当前参数效果，视为一步可应用草稿
+  draft.value = true
   rebuild()
-  pushSnapshot()
 }
 
 async function handleFileChange(event: Event) {
@@ -177,17 +231,49 @@ function onColorChange(mode: 'from' | 'to', event: Event) {
   const value = (event.target as HTMLInputElement).value
   if (mode === 'from') fromHex.value = value
   else toHex.value = value
-  rebuild()
-  pushSnapshot()
+  beginDraft()
 }
 
 function onToleranceInput(event: Event) {
   tolerance.value = Number((event.target as HTMLInputElement).value)
-  rebuild()
+  beginDraft()
 }
 
 function onToleranceCommit() {
-  pushSnapshot()
+  draft.value = true
+}
+
+const HEX_PATTERN = /^#?([0-9a-f]{6})$/i
+
+/** 手动输入 6 位 HEX：非法值回退成当前值并提示，合法值大写后生效 */
+function onHexInput(mode: 'from' | 'to', event: Event) {
+  const el = event.target as HTMLInputElement
+  let v = el.value.trim()
+  if (!v.startsWith('#')) v = `#${v}`
+  if (!HEX_PATTERN.test(v)) {
+    el.value = mode === 'from' ? fromHex.value : toHex.value
+    showToast('请输入 6 位十六进制颜色，如 #ffcc99', 'error')
+    return
+  }
+  const next = v.toUpperCase()
+  if (mode === 'from') fromHex.value = next
+  else toHex.value = next
+  beginDraft()
+}
+
+/** 一键恢复原图并清空所有已应用步骤 */
+function restoreOriginal() {
+  rect.value = { x: 0.25, y: 0.25, w: 0.5, h: 0.5 }
+  fromHex.value = '#1a1a1a'
+  toHex.value = '#f0c8a8'
+  tolerance.value = 25
+  picker.value = null
+  hideMag()
+  steps.value = []
+  redoStack.value = []
+  draft.value = false
+  rebuild()
+  showToast('已恢复原图效果', 'success')
 }
 
 /** 取色：点击预览图，读原图基准画布该点颜色 */
@@ -210,8 +296,7 @@ function pickColorAt(event: PointerEvent) {
   }
   picker.value = null
   hideMag()
-  rebuild()
-  pushSnapshot()
+  beginDraft()
 }
 
 // ---- 取色放大镜：进入取色模式时，鼠标跟随一个放大预览，方便精准取色 ----
@@ -323,6 +408,7 @@ function onStagePointerDown(event: PointerEvent) {
     startY: event.clientY,
   }
   stageRef.value?.setPointerCapture(event.pointerId)
+  draft.value = true
 }
 
 function onStagePointerMove(event: PointerEvent) {
@@ -375,7 +461,7 @@ function onStagePointerMove(event: PointerEvent) {
 function onStagePointerUp() {
   if (!dragState) return
   dragState = null
-  pushSnapshot()
+  draft.value = true
 }
 
 async function resultFiles(): Promise<File[]> {
@@ -388,6 +474,18 @@ function saveResult() {
   if (!source.value || !resultCanvas) return
   downloadCanvas(resultCanvas, `${source.value.name}_改色.png`)
   showToast('已开始下载', 'success')
+}
+
+/** 改色结果直送下一步工具 */
+async function onPickNext(key: string) {
+  if (!['compress', 'format', 'edit', 'grid'].includes(key)) return
+  const files = await resultFiles()
+  const first = files[0]
+  if (!first) {
+    showToast('还没有可发送的改色结果', 'error')
+    return
+  }
+  emit('navigate', key as 'compress', first)
 }
 
 onMounted(() => {
@@ -420,6 +518,7 @@ onUnmounted(() => {
       <div v-if="!source" class="empty-state">
         <div class="empty-icon" v-html="EMPTY_ICON"></div>
         <div>框选一块区域，把区域里的颜色替换成你取到的颜色</div>
+        <p class="empty-hint">适合把衣服、车身、背景色一键换成想要的颜色</p>
         <div class="empty-actions">
           <button class="btn btn-primary" style="width: 180px" @click="pickImage">选择图片</button>
           <button class="btn btn-sample" @click="loadSample">体验示例</button>
@@ -428,7 +527,20 @@ onUnmounted(() => {
 
       <template v-else>
         <div class="card">
-          <div class="card-title">编辑预览</div>
+          <div class="card-title">
+            改色预览
+            <span class="edit-history-actions">
+              <button class="icon-btn" :disabled="!canUndo" title="撤销" aria-label="撤销" @click="undo">↶</button>
+              <button class="icon-btn" :disabled="!canRedo" title="重做" aria-label="重做" @click="redo">↷</button>
+              <button
+                class="icon-btn danger"
+                :disabled="steps.length === 0"
+                title="恢复原图"
+                aria-label="恢复原图"
+                @click="restoreOriginal"
+              >⟳</button>
+            </span>
+          </div>
           <div class="preview-wrap">
             <div
               ref="stageRef"
@@ -466,19 +578,12 @@ onUnmounted(() => {
         <div class="card">
           <div class="card-title">改色参数</div>
           <div class="form-row">
-            <span class="label">历史</span>
-            <div class="row-ctrl">
-              <button class="btn btn-outline btn-sm" :disabled="!canUndo" @click="undo">撤销</button>
-              <button class="btn btn-outline btn-sm" :disabled="!canRedo" @click="redo">重做</button>
-            </div>
-          </div>
-          <div class="form-row">
             <span class="label">替换的颜色</span>
             <div class="row-ctrl">
               <label class="swatch" :style="{ background: fromHex }" title="点击选择颜色">
                 <input type="color" class="color-input-hidden" :value="fromHex" @input="onColorChange('from', $event)" />
               </label>
-              <span class="color-hex">{{ fromHex }}</span>
+              <input class="color-hex-input" :value="fromHex" spellcheck="false" @change="onHexInput('from', $event)" />
               <button class="btn btn-outline btn-sm" @click="startPick('from')">
                 {{ picker === 'from' ? '取消取色' : '取色器' }}
               </button>
@@ -490,7 +595,7 @@ onUnmounted(() => {
               <label class="swatch" :style="{ background: toHex }" title="点击选择颜色">
                 <input type="color" class="color-input-hidden" :value="toHex" @input="onColorChange('to', $event)" />
               </label>
-              <span class="color-hex">{{ toHex }}</span>
+              <input class="color-hex-input" :value="toHex" spellcheck="false" @change="onHexInput('to', $event)" />
               <button class="btn btn-outline btn-sm" @click="startPick('to')">
                 {{ picker === 'to' ? '取消取色' : '取色器' }}
               </button>
@@ -512,9 +617,17 @@ onUnmounted(() => {
               <span class="range-value">{{ tolerance }}</span>
             </div>
           </div>
+          <button class="btn btn-primary btn-block btn-apply" :disabled="!draft" @click="applyCurrent">
+            {{ draft ? '应用这步改色并继续改下一块' : '框选并取色后即可应用这步改色' }}
+          </button>
           <p class="tip-text">
-            容差越大覆盖的颜色范围越宽。用取色器在图片上点两下：先点要替换的「源色」，再点想要的「目标色」。
+            容差越大覆盖的颜色范围越宽。用取色器在图上点两下：先点要替换的「源色」，再点想要的「目标色」。改好一块点「应用」，可连续改多块。
           </p>
+        </div>
+
+        <!-- 改色结果直送下一步：压缩 / 转格式 / 继续编辑 / 切九宫格 -->
+        <div v-if="source" class="next-row">
+          <NextTools :options="NEXT_CHAIN" @pick="onPickNext" />
         </div>
       </template>
     </div>
@@ -621,11 +734,20 @@ onUnmounted(() => {
   cursor: pointer;
 }
 
-.color-hex {
-  min-width: 68px;
+.color-hex-input {
+  width: 86px;
+  padding: 6px 9px;
   font-size: 12px;
   color: var(--text-sub);
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
   font-variant-numeric: tabular-nums;
+}
+
+.color-hex-input:focus {
+  outline: none;
+  border-color: var(--primary);
 }
 
 .slider {
@@ -717,5 +839,12 @@ onUnmounted(() => {
   .edit-stage {
     max-width: 100%;
   }
+}
+
+/* 接力段：与上方区块划清边界，全局「换个方式处理」样式一致 */
+.next-row {
+  margin: 2px 0 8px;
+  padding: 16px 2px 0;
+  border-top: 1px solid rgba(31, 41, 55, 0.06);
 }
 </style>

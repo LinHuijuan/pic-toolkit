@@ -15,7 +15,10 @@ import {
 import { detectSmartCrop } from '../utils/smartCrop'
 import { showToast } from '../utils/toast'
 import { fetchSampleFile } from '../utils/sampleImage'
+import { readExifInfo, type ExifInfo } from '../utils/exif'
+import ImageInfoCard from '../components/ImageInfoCard.vue'
 import ShareButton from '../components/ShareButton.vue'
+import CopyButton from '../components/CopyButton.vue'
 
 const emit = defineEmits<{ back: []; navigate: [view: NextToolKey, file?: File]; consumed: [] }>()
 
@@ -59,6 +62,12 @@ const crop = ref({ x: 0, y: 0, w: 1, h: 1 })
 /** 调色 / 滤镜状态 */
 const adjustments = ref<ImageAdjustments>({ ...DEFAULT_ADJUSTMENTS })
 const activeFilter = ref<FilterKey | 'custom'>('none')
+
+/** 源文件对象，用于文件信息展示 */
+const sourceFile = ref<File | null>(null)
+
+/** 源 JPEG 的拍摄信息，用于界面展示（非 JPEG 或无 EXIF 时为空） */
+const exifInfo = ref<ExifInfo | null>(null)
 
 /** 撤销 / 重做历史快照 */
 interface EditSnapshot {
@@ -129,6 +138,12 @@ async function handleFileChange(event: Event) {
 async function processFile(file: File) {
   const loaded = await loadImageFromFile(file)
   source.value = loaded
+  sourceFile.value = file
+  try {
+    exifInfo.value = await readExifInfo(file)
+  } catch {
+    exifInfo.value = null
+  }
   rotation.value = 0
   flipH.value = false
   flipV.value = false
@@ -183,6 +198,7 @@ function pushSnapshot() {
   if (last && JSON.stringify(last) === JSON.stringify(snap)) return
   history.value = history.value.slice(0, historyIndex.value + 1)
   history.value.push(snap)
+  if (history.value.length > 50) history.value.shift()
   historyIndex.value = history.value.length - 1
 }
 
@@ -207,6 +223,14 @@ function redo() {
   if (!canRedo.value) return
   historyIndex.value++
   applySnapshot(history.value[historyIndex.value])
+}
+
+/** 一键回到原图：跳到初始快照（history[0]），此后重做仍可往前 */
+function restoreOriginal() {
+  if (history.value.length === 0) return
+  historyIndex.value = 0
+  applySnapshot(history.value[0])
+  showToast('已恢复原图', 'success')
 }
 
 /** 应用一键滤镜 */
@@ -264,17 +288,46 @@ function renderPreview() {
   el.getContext('2d')?.drawImage(transformCanvas, 0, 0, el.width, el.height)
 }
 
+/** 把裁切框（归一化 0~1）经旋转/翻转映射到新坐标空间，近似保留裁剪区域 */
+function remapCropThrough(action: 'r90' | 'flipH' | 'flipV') {
+  const c = crop.value
+  const clamp = (v: number) => Math.min(1, Math.max(0, v))
+  // 各操作都是相对「当前显示方向」的坐标映射：r90 顺时针、flip 沿显示轴镜像
+  const map = (x: number, y: number): [number, number] => {
+    if (action === 'flipH') return [1 - x, y]
+    if (action === 'flipV') return [x, 1 - y]
+    // 顺时针 90°：旧 (x,y) → 新 (1-y, x)
+    return [1 - y, x]
+  }
+  const corners = [
+    [c.x, c.y],
+    [c.x + c.w, c.y],
+    [c.x, c.y + c.h],
+    [c.x + c.w, c.y + c.h],
+  ].map(([px, py]) => map(px, py))
+  const xs = corners.map((p) => p[0])
+  const ys = corners.map((p) => p[1])
+  const x0 = clamp(Math.min(...xs))
+  const y0 = clamp(Math.min(...ys))
+  const x1 = clamp(Math.max(...xs))
+  const y1 = clamp(Math.max(...ys))
+  crop.value = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+}
+
 function rotateRight() {
   pushSnapshot()
+  // 先按旧裁切框映射到旋转后的坐标空间，再更新旋转角：裁剪区域不丢失
+  remapCropThrough('r90')
   rotation.value = ((rotation.value + 90) % 360) as EditTransform['rotation']
-  rebuild(true)
+  rebuild(false)
 }
 
 function toggleFlip(dir: 'h' | 'v') {
   pushSnapshot()
+  remapCropThrough(dir === 'h' ? 'flipH' : 'flipV')
   if (dir === 'h') flipH.value = !flipH.value
   else flipV.value = !flipV.value
-  rebuild(true)
+  rebuild(false)
 }
 
 function switchRatio(key: string) {
@@ -554,6 +607,7 @@ onUnmounted(() => {
       <div v-if="!source" class="empty-state">
         <div class="empty-icon" v-html="EMPTY_ICON"></div>
         <div>选择一张图片，自由裁剪、旋转翻转</div>
+        <p class="empty-hint">适合发朋友圈前顺一遍方向、裁掉杂物，让构图更干净</p>
         <div class="empty-actions">
           <button class="btn btn-primary" style="width: 180px" @click="pickImage">选择图片</button>
           <button class="btn btn-sample" @click="loadSample">体验示例图</button>
@@ -563,7 +617,20 @@ onUnmounted(() => {
       <template v-else>
         <!-- 编辑预览 -->
         <div class="card">
-          <div class="card-title">编辑预览</div>
+          <div class="card-title">
+            <span class="edit-title-label">编辑预览</span>
+            <span class="edit-history-actions">
+              <button class="icon-btn" :disabled="!canUndo" title="撤销" aria-label="撤销" @click="undo">↶</button>
+              <button class="icon-btn" :disabled="!canRedo" title="重做" aria-label="重做" @click="redo">↷</button>
+              <button
+                class="icon-btn danger"
+                :disabled="history.length === 0"
+                title="恢复原图"
+                aria-label="恢复原图"
+                @click="restoreOriginal"
+              >⟳</button>
+            </span>
+          </div>
           <div class="preview-wrap">
             <div
               ref="stageRef"
@@ -587,13 +654,6 @@ onUnmounted(() => {
         <!-- 编辑操作 -->
         <div class="card">
           <div class="card-title">编辑操作</div>
-          <div class="form-row">
-            <span class="label">历史</span>
-            <div style="display: flex; gap: 8px; flex: 1; justify-content: flex-end">
-              <button class="btn btn-outline btn-sm" :disabled="!canUndo" @click="undo">撤销</button>
-              <button class="btn btn-outline btn-sm" :disabled="!canRedo" @click="redo">重做</button>
-            </div>
-          </div>
           <div class="form-row">
             <span class="label">滤镜</span>
             <div class="filter-chips">
@@ -678,10 +738,16 @@ onUnmounted(() => {
           </div>
           <div class="form-row">
             <span class="label">方向</span>
-            <div style="display: flex; gap: 8px; flex: 1; justify-content: flex-end; flex-wrap: wrap">
-              <button class="btn btn-outline btn-sm" @click="rotateRight">旋转 90°</button>
-              <button class="btn btn-outline btn-sm" @click="toggleFlip('h')">水平翻转</button>
-              <button class="btn btn-outline btn-sm" @click="toggleFlip('v')">垂直翻转</button>
+            <div class="dir-actions">
+              <button class="dir-btn" @click="rotateRight" title="旋转 90°">
+                <span class="dir-icon">↻</span><span class="dir-txt">旋转</span>
+              </button>
+              <button class="dir-btn" @click="toggleFlip('h')" title="水平翻转">
+                <span class="dir-icon">⇋</span><span class="dir-txt">横翻</span>
+              </button>
+              <button class="dir-btn" @click="toggleFlip('v')" title="垂直翻转">
+                <span class="dir-icon">⇅</span><span class="dir-txt">竖翻</span>
+              </button>
             </div>
           </div>
           <div class="form-row">
@@ -716,6 +782,14 @@ onUnmounted(() => {
           </p>
         </div>
 
+        <!-- 图片信息：放在编辑操作之后，改完向下看即可确认输出信息，无需往回滚 -->
+        <ImageInfoCard
+          :file="sourceFile"
+          :width="source?.width ?? null"
+          :height="source?.height ?? null"
+          :exif="exifInfo"
+        />
+
         <!-- 继续处理 -->
         <div v-if="showNextTools" class="card">
           <div class="card-title">继续处理</div>
@@ -739,6 +813,7 @@ onUnmounted(() => {
       <button class="btn btn-ghost" @click="pickImage">重新选图</button>
       <button class="btn btn-outline" @click="showNextTools = !showNextTools">继续处理</button>
       <ShareButton :get-files="resultFiles" variant="outline" />
+      <CopyButton :get-files="resultFiles" variant="outline" />
       <button class="btn btn-primary" @click="saveResult">保存图片</button>
     </div>
 

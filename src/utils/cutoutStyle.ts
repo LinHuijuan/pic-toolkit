@@ -34,7 +34,9 @@ export const DEFAULT_CUTOUT_STYLE: CutoutStyle = {
   shadowColor: 'rgba(15, 23, 42, 0.35)',
   shadowBlur: 0,
   shadowOffsetY: 12,
-  shrinkWidth: 1,
+  // 默认收缩 2px：量化模型在发丝/轮廓外普遍留一圈背景，略多收一点让开箱结果更干净。
+  // 高分辨率下这一圈在屏幕上看依旧很小，需要更狠的可手动把「边缘收缩」往上调。
+  shrinkWidth: 2,
   featherWidth: 0,
 }
 

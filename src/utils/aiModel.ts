@@ -66,9 +66,26 @@ export function prepareAiModel(): Promise<void> {
   return preparing
 }
 
+/** 曾经下载失败后，联网时自动再试一次，兑现「联网后即可自动下载」 */
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => {
+    if (prepared || preparing || aiModel.stage !== 'error') return
+    prepareAiModel().catch(() => {})
+  })
+}
+
 async function doPrepare(): Promise<void> {
   const start = Date.now()
   const device = await detectInferenceDevice()
+  // 兜底：一眼看出在离线状态就提前说明原因，别让用户对着失败猜测是不是网络
+  if (!navigator.onLine) {
+    preparing = null
+    setProgress({
+      stage: 'error',
+      message: '当前处于离线状态，联网后即可自动下载模型',
+    })
+    throw new Error('offline')
+  }
   try {
     const { preload, removeBackground } = await import('@imgly/background-removal')
 
@@ -129,10 +146,14 @@ async function doPrepare(): Promise<void> {
     })
   } catch (error) {
     preparing = null
-    setProgress({
-      stage: 'error',
-      message: error instanceof Error ? error.message : '模型下载失败，请检查网络后重试',
-    })
+    // 兜底：把网络类失败说得更直白（离线、超时、未知都归到「检查网络」，同时保留原始信息供排查）
+    const raw = error instanceof Error ? error.message : String(error)
+    const friendly = !navigator.onLine
+      ? '未连接网络，联网后重试'
+      : /fetch|network|net::|timeout|load/i.test(raw)
+        ? `下载失败，请检查网络后重试（${raw}）`
+        : '模型初始化失败，请重试'
+    setProgress({ stage: 'error', message: friendly })
     throw error
   }
 }

@@ -11,11 +11,18 @@ import {
 import { saveMany } from '../utils/zip'
 import { withJpegMetadata } from '../utils/exif'
 import ShareButton from '../components/ShareButton.vue'
+import CopyButton from '../components/CopyButton.vue'
+import NextTools from '../components/NextTools.vue'
 import { drawWatermark, drawImageWatermark, type WatermarkMode, type WatermarkPosition } from '../utils/watermark'
 import { showToast } from '../utils/toast'
+import { usePref } from '../utils/prefs'
 import { fetchSampleFile } from '../utils/sampleImage'
 
-const emit = defineEmits<{ back: []; consumed: [] }>()
+const emit = defineEmits<{
+  back: []
+  consumed: []
+  navigate: [view: 'compress' | 'format', file: File]
+}>()
 
 const props = defineProps<{ incomingFile?: File | null }>()
 
@@ -32,16 +39,18 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const logoInput = ref<HTMLInputElement | null>(null)
 const source = ref<LoadedImage | null>(null)
 
-const wmType = ref<'text' | 'image'>('text')
-const text = ref('© 图片工具箱')
-const mode = ref<WatermarkMode>('tile')
-const fontSizeRatio = ref(4) // 百分比，4 = 4%
-const logoSizeRatio = ref(20) // 百分比，20 = 20%
-const opacity = ref(40) // 百分比
-const color = ref('#ffffff')
-const position = ref<WatermarkPosition>('bottom-right')
-const angle = ref(-30)
-const fontFamily = ref('sans-serif')
+const wmType = usePref<'text' | 'image'>('wm.type', 'text')
+const text = usePref('wm.text', '© 图片工具箱')
+const mode = usePref<WatermarkMode>('wm.mode', 'tile')
+const fontSizeRatio = usePref('wm.fontSizeRatio', 4) // 百分比，4 = 4%
+const logoSizeRatio = usePref('wm.logoSizeRatio', 20) // 百分比，20 = 20%
+const opacity = usePref('wm.opacity', 40) // 百分比
+const color = usePref('wm.color', '#ffffff')
+const position = usePref<WatermarkPosition>('wm.position', 'bottom-right')
+const angle = usePref('wm.angle', -30)
+/** 平铺稀疏程度：1=默认，越小越密、越大越疏 */
+const tileSpacing = usePref('wm.tileSpacing', 1)
+const fontFamily = usePref('wm.fontFamily', 'sans-serif')
 
 const FONTS = [
   { label: '默认', value: 'sans-serif' },
@@ -77,7 +86,7 @@ const stageRef = ref<HTMLDivElement | null>(null)
 const MARGIN_RATIO = 0.05
 
 /** 快照式撤销/重做：记录每次生成的水印结果，可回退/前进（与编辑页一致） */
-const MAX_HISTORY = 20
+const MAX_HISTORY = 50
 const resultStack = ref<{ canvas: HTMLCanvasElement; url: string }[]>([])
 const resultIndex = ref(-1)
 
@@ -331,6 +340,7 @@ function renderWatermark(bitmap: ImageBitmap, imgW: number, imgH: number): HTMLC
     mode: mode.value,
     position: position.value,
     angle: angle.value,
+    spacing: tileSpacing.value,
     fontFamily: fontFamily.value,
     xRatio: ratio?.x,
     yRatio: ratio?.y,
@@ -349,6 +359,22 @@ function applyWatermark() {
 async function resultFiles(): Promise<File[]> {
   if (!source.value || !resultCanvas.value) return []
   return [await canvasToFile(resultCanvas.value, `${source.value.name}_水印.png`)]
+}
+
+/** 水印成果直送下一个工具 */
+const NEXT_CHAIN: { key: 'compress' | 'format'; label: string }[] = [
+  { key: 'compress', label: '压体积' },
+  { key: 'format', label: '转格式' },
+]
+
+async function onPickNext(key: string) {
+  if (key !== 'compress' && key !== 'format') return
+  const [file] = await resultFiles()
+  if (!file) {
+    showToast('还没有可发送的水印结果', 'error')
+    return
+  }
+  emit('navigate', key, file)
 }
 
 function saveResult() {
@@ -371,6 +397,8 @@ const batchInput = ref<HTMLInputElement | null>(null)
 const batchItems = ref<BatchItem[]>([])
 const batchProcessing = ref(false)
 const batchProgress = ref({ done: 0, total: 0 })
+/** 用户点「停止」后置位，runBatch 不再处理后续图片 */
+const batchCancelled = ref(false)
 /** 保留源 JPEG 的拍摄信息：默认关，EXIF 可能含 GPS，由用户显式开启 */
 const keepMeta = ref(false)
 
@@ -403,9 +431,11 @@ async function runBatch(files: File[]) {
   }
   clearBatch()
   batchProcessing.value = true
+  batchCancelled.value = false
   batchProgress.value = { done: 0, total: list.length }
   try {
     for (const file of list) {
+      if (batchCancelled.value) break
       try {
         const image = await loadImageFromFile(file)
         const { type, ext } = pickOutputType(file)
@@ -429,6 +459,13 @@ async function runBatch(files: File[]) {
   } finally {
     batchProcessing.value = false
   }
+}
+
+/** 终止批量加水印：正在跑的那张会跑完，其后的不再启动 */
+function cancelBatch() {
+  if (!batchProcessing.value) return
+  batchCancelled.value = true
+  showToast('已停止后续加水印', 'info')
 }
 
 async function handleBatchChange(event: Event) {
@@ -468,6 +505,7 @@ function handleReplace() {
       width: canvas.width,
       height: canvas.height,
       name: source.value?.name ?? 'image',
+      downscaled: source.value?.downscaled ?? false,
     }
     applyWatermark()
   })
@@ -475,7 +513,7 @@ function handleReplace() {
 
 // 参数变化时自动重新生成
 watch(
-  [text, mode, wmType, fontSizeRatio, logoSizeRatio, opacity, color, position, angle, fontFamily],
+  [text, mode, wmType, fontSizeRatio, logoSizeRatio, opacity, color, position, angle, tileSpacing, fontFamily],
   applyWatermark,
 )
 
@@ -533,6 +571,7 @@ onUnmounted(() => {
       <div v-if="!source" class="empty-state">
         <div class="empty-icon" v-html="EMPTY_ICON"></div>
         <div>选择一张图片添加水印</div>
+        <p class="empty-hint">适合给作品打署名，或加满屏水印防止被随意搬运</p>
         <div class="empty-actions">
                   <button class="btn btn-primary" style="width: 180px" @click="pickImage">选择图片</button>
                   <button class="btn btn-sample" @click="loadSample">体验示例图</button>
@@ -540,9 +579,15 @@ onUnmounted(() => {
       </div>
 
       <template v-else>
-        <!-- 结果预览 -->
+        <!-- 预览 + 常用操作同屏：改文字/选模板时图片实时可见 -->
         <div class="card">
-          <div class="card-title">预览</div>
+          <div class="card-title">
+            预览
+            <span class="edit-history-actions">
+              <button class="icon-btn" :disabled="resultIndex <= 0" title="撤销" aria-label="撤销" @click="undo">↶</button>
+              <button class="icon-btn" :disabled="resultIndex >= resultStack.length - 1" title="重做" aria-label="重做" @click="redo">↷</button>
+            </span>
+          </div>
           <div class="preview-wrap">
             <div ref="stageRef" class="wm-stage">
               <img :src="resultUrl" alt="水印预览" />
@@ -551,6 +596,7 @@ onUnmounted(() => {
                 :src="logoUrl"
                 alt="Logo 水印"
                 class="wm-text"
+                draggable="false"
                 :style="wmStyle"
                 @pointerdown="startDrag"
                 @pointermove="onDragMove"
@@ -560,6 +606,7 @@ onUnmounted(() => {
               <div
                 v-else-if="mode === 'single'"
                 class="wm-text"
+                draggable="false"
                 :style="wmStyle"
                 @pointerdown="startDrag"
                 @pointermove="onDragMove"
@@ -568,55 +615,12 @@ onUnmounted(() => {
               >{{ text }}</div>
             </div>
           </div>
-          <!-- 撤销/重做作用在预览结果上，摆在预览下面而不是底栏：底栏窄屏装不下 6 项 -->
-          <div class="form-row">
-            <span class="label">叠加历史</span>
-            <div style="display: flex; gap: 8px; flex: 1; justify-content: flex-end">
-              <button class="btn btn-outline btn-sm" :disabled="resultIndex <= 0" @click="undo">撤销</button>
-              <button class="btn btn-outline btn-sm" :disabled="resultIndex >= resultStack.length - 1" @click="redo">
-                重做
-              </button>
-            </div>
-          </div>
-        </div>
 
-        <!-- 水印设置 -->
+          </div>
+
+        <!-- 水印设置：高频可调参数紧贴预览，类型/模板这类低频设定收尾 -->
         <div class="card">
           <div class="card-title">水印设置</div>
-
-          <div class="form-row">
-            <span class="label">水印类型</span>
-            <div class="seg-control" style="flex: 1">
-              <div class="seg-item" :class="{ active: wmType === 'text' }" @click="wmType = 'text'">
-                文字
-              </div>
-              <div class="seg-item" :class="{ active: wmType === 'image' }" @click="wmType = 'image'">
-                图片
-              </div>
-            </div>
-          </div>
-
-          <div v-if="wmType === 'text'" class="form-row">
-            <span class="label">水印文字</span>
-            <input v-model="text" type="text" maxlength="30" placeholder="请输入水印文字" />
-          </div>
-
-          <div v-if="wmType === 'text'" class="form-row">
-            <span class="label">模板</span>
-            <div class="tmpl-chips">
-              <span v-for="t in WATERMARK_TEMPLATES" :key="t" class="tmpl-chip" @click="applyTemplate(t)">{{ t }}</span>
-            </div>
-          </div>
-
-          <div v-else class="form-row">
-            <span class="label">Logo 图片</span>
-            <button class="btn btn-outline" style="flex: 1; padding: 8px" @click="logoInput?.click()">
-              {{ logo ? '更换 Logo' : '选择 Logo' }}
-            </button>
-          </div>
-          <p v-if="wmType === 'image'" class="tip-text" style="margin-top: 2px">
-            建议使用透明背景 PNG，小尺寸 Logo 效果更佳。
-          </p>
 
           <div class="form-row">
             <span class="label">样式</span>
@@ -628,6 +632,11 @@ onUnmounted(() => {
                 单点
               </div>
             </div>
+          </div>
+
+          <div v-if="wmType === 'text'" class="form-row">
+            <span class="label">水印文字</span>
+            <input v-model="text" type="text" maxlength="30" placeholder="请输入水印文字" />
           </div>
 
           <div v-if="mode === 'tile' && wmType === 'text'" class="range-row">
@@ -666,13 +675,6 @@ onUnmounted(() => {
             <span class="range-val">{{ fontSizeRatio }}%</span>
           </div>
 
-          <div v-if="wmType === 'text'" class="form-row">
-            <span class="label">字体</span>
-            <select v-model="fontFamily" class="select-input" style="flex: 1">
-              <option v-for="f in FONTS" :key="f.value" :value="f.value">{{ f.label }}</option>
-            </select>
-          </div>
-
           <div class="range-row">
             <span class="label">透明度</span>
             <input v-model.number="opacity" type="range" min="5" max="100" step="5" />
@@ -692,6 +694,50 @@ onUnmounted(() => {
               ></div>
             </div>
           </div>
+
+          <div v-if="mode === 'tile'" class="range-row">
+            <span class="label">平铺稀疏</span>
+            <input v-model.number="tileSpacing" type="range" min="0.4" max="2.5" step="0.1" />
+            <span class="range-val">{{ tileSpacing.toFixed(1) }}×</span>
+          </div>
+
+          <div v-if="wmType === 'text'" class="form-row">
+            <span class="label">字体</span>
+            <select v-model="fontFamily" class="select-input" style="flex: 1">
+              <option v-for="f in FONTS" :key="f.value" :value="f.value">{{ f.label }}</option>
+            </select>
+          </div>
+
+          <div class="ft-divider"></div>
+
+          <div class="form-row">
+            <span class="label">水印类型</span>
+            <div class="seg-control" style="flex: 1">
+              <div class="seg-item" :class="{ active: wmType === 'text' }" @click="wmType = 'text'">
+                文字
+              </div>
+              <div class="seg-item" :class="{ active: wmType === 'image' }" @click="wmType = 'image'">
+                图片
+              </div>
+            </div>
+          </div>
+
+          <div v-if="wmType === 'text'" class="form-row">
+            <span class="label">模板</span>
+            <div class="tmpl-chips">
+              <span v-for="t in WATERMARK_TEMPLATES" :key="t" class="tmpl-chip" @click="applyTemplate(t)">{{ t }}</span>
+            </div>
+          </div>
+
+          <div v-else class="form-row">
+            <span class="label">Logo 图片</span>
+            <button class="btn btn-outline" style="flex: 1; padding: 8px" @click="logoInput?.click()">
+              {{ logo ? '更换 Logo' : '选择 Logo' }}
+            </button>
+          </div>
+          <p v-if="wmType === 'image'" class="tip-text" style="margin-top: 2px">
+            建议使用透明背景 PNG，小尺寸 Logo 效果更佳。
+          </p>
         </div>
 
         <p class="tip-text">
@@ -718,6 +764,14 @@ onUnmounted(() => {
         >
           {{ batchProcessing ? `处理中 ${batchProgress.done} / ${batchProgress.total}` : '选择多张图片' }}
         </button>
+        <button
+          v-if="batchProcessing"
+          class="btn btn-ghost"
+          style="width: 100%; margin-top: 8px"
+          @click="cancelBatch"
+        >
+          停止
+        </button>
         <div v-if="batchItems.length > 0" class="batch-grid">
           <img
             v-for="item in batchItems"
@@ -740,7 +794,13 @@ onUnmounted(() => {
       <button class="btn btn-ghost" @click="pickImage">重新选图</button>
       <button class="btn btn-outline" @click="handleReplace">继续叠加</button>
       <ShareButton :get-files="resultFiles" variant="outline" />
+      <CopyButton :get-files="resultFiles" variant="outline" />
       <button class="btn btn-primary" @click="saveResult">保存图片</button>
+    </div>
+
+    <!-- 加水印后把成品直送下一个工具 -->
+    <div v-if="resultUrl && source" class="next-row">
+      <NextTools :options="NEXT_CHAIN" @pick="onPickNext" />
     </div>
 
     <!-- 隐藏的文件输入 -->
@@ -871,6 +931,9 @@ onUnmounted(() => {
   cursor: move;
   user-select: none;
   -webkit-user-select: none;
+  -webkit-user-drag: none;
+  user-drag: none;
+  -webkit-touch-callout: none;
   font-family: sans-serif;
   line-height: 1;
 }
@@ -902,5 +965,61 @@ onUnmounted(() => {
   flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-end;
+}
+
+.next-row {
+  margin-top: 16px;
+  padding: 0 2px;
+}
+
+/* 常用操作与图片之间浅分隔线 */
+.ft-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 2px 0 12px;
+}
+
+/* 折叠的「更多选项」卡片：默认收起，点开才释放次要参数 */
+.wm-more summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.wm-more summary::-webkit-details-marker {
+  display: none;
+}
+
+.wm-more summary::after {
+  content: '▾';
+  color: var(--text-sub);
+  font-size: 15px;
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+
+.wm-more[open] summary::after {
+  transform: rotate(180deg);
+}
+
+.wm-more[open] .card-title {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+}
+
+.more-title {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.more-hint {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-sub);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>

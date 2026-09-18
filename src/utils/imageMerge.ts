@@ -10,6 +10,8 @@ export interface MergeOptions {
   direction: MergeDirection
   /** 图片间距（px），默认 0 */
   gap?: number
+  /** 画布背景色（hex），默认透明；长图模式下需要与网格一致的间隔填色时传入 */
+  bg?: string | null
 }
 
 /** 浏览器 canvas 最大边长（Chrome/Safari 约 16384px，超出无法绘制） */
@@ -43,6 +45,11 @@ export function mergeImages(
   const ctx = canvas.getContext('2d')
   if (!ctx) {
     throw new Error('当前浏览器不支持 Canvas 2D')
+  }
+
+  if (options.bg) {
+    ctx.fillStyle = options.bg
+    ctx.fillRect(0, 0, canvasW, canvasH)
   }
 
   let cursor = 0

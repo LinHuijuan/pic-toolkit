@@ -1,15 +1,25 @@
 <script setup lang="ts">
-import { ref, computed, watch, onUnmounted } from 'vue'
+import { ref, computed, onUnmounted } from 'vue'
 import { useImageDrop } from '../composables/useImageDrop'
 import { loadImageFromFile, canvasToFile, downloadCanvas, type LoadedImage } from '../utils/imageLoader'
 import { createCollage } from '../utils/imageCollage'
 import { mergeImages, fitCanvasRatio, type MergeDirection, type CanvasFitMode } from '../utils/imageMerge'
+import { applyRotFlip } from '../utils/rotflip'
 import { showToast } from '../utils/toast'
 import { fetchSampleFiles } from '../utils/sampleImage'
 import ShareButton from '../components/ShareButton.vue'
+import NextTools from '../components/NextTools.vue'
 
-const emit = defineEmits<{ back: [] }>()
+const emit = defineEmits<{
+  back: []
+  navigate: [view: 'compress' | 'format', file: File]
+}>()
 const props = defineProps<{ mode?: 'grid' | 'merge' }>()
+
+const NEXT_CHAIN: { key: 'compress' | 'format'; label: string }[] = [
+  { key: 'compress', label: '压体积' },
+  { key: 'format', label: '转格式' },
+]
 
 /** 当前拼图模式：网格 / 长图 */
 const mode = ref<'grid' | 'merge'>(props.mode ?? 'grid')
@@ -30,7 +40,6 @@ useImageDrop(async (files) => {
 const fileInput = ref<HTMLInputElement | null>(null)
 const images = ref<LoadedImage[]>([])
 const resultCanvas = ref<HTMLCanvasElement | null>(null)
-const previewCanvas = ref<HTMLCanvasElement | null>(null)
 const previewUrls = ref<string[]>([])
 
 /** 空状态渐变 SVG 图标（与首页功能卡片风格一致） */
@@ -57,6 +66,59 @@ const BGS = [
 
 const currentGrid = computed(() => GRIDS.find((g) => g.key === gridKey.value) ?? GRIDS[2])
 const currentBg = computed(() => BGS.find((b) => b.key === bgKey.value)?.value ?? null)
+
+// ---------- 交互式预览：把拼图结果铺成可拖拽换位的图片网格 ----------
+/** 网格模式下需要渲染的格子数量（行列之积；不足的格子留空作占位/终点） */
+const previewCellCount = computed(() => {
+  if (mode.value !== 'grid') return 0
+  return currentGrid.value.rows * currentGrid.value.cols
+})
+
+/** 网格预览样式：按当前布局排布，等比方形格 + 当前间距/背景（贴近导出效果） */
+const gridStyle = computed<Record<string, string>>(() => ({
+  gridTemplateColumns: `repeat(${currentGrid.value.cols}, 1fr)`,
+  gridAutoRows: '1fr',
+  aspectRatio: `${currentGrid.value.cols} / ${currentGrid.value.rows}`,
+  gap: `${gap.value}px`,
+  background: currentBg.value ?? 'transparent',
+}))
+
+/** 当前高亮的放下目标格 */
+const dragOverIndex = ref<number | null>(null)
+
+function onPreviewDragOver(index: number, event: DragEvent) {
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  dragOverIndex.value = index
+}
+
+function onPreviewDrop(index: number) {
+  const from = dragIndex.value
+  dragIndex.value = null
+  dragOverIndex.value = null
+  if (from == null || from === index) return
+  moveImage(from, index)
+}
+
+// ---------- 点选格子：旋转 / 翻转 / 删除 直接作用于选中格 ----------
+const selected = ref<number | null>(null)
+
+const selectedLabel = computed(() => (selected.value != null && selected.value < images.value.length ? `第 ${selected.value + 1} 张` : ''))
+
+function toggleSelect(index: number) {
+  if (index >= images.value.length) return
+  selected.value = selected.value === index ? null : index
+}
+
+function cellAction(action: 'r90' | 'flipH' | 'flipV' | 'delete') {
+  const i = selected.value
+  if (i == null || i >= images.value.length) return
+  if (action === 'delete') {
+    removeImage(i)
+  } else {
+    rotateImage(i, action)
+  }
+}
 
 // ---------- 长图模式参数 ----------
 const direction = ref<MergeDirection>('vertical')
@@ -116,22 +178,10 @@ function onDragStart(index: number, event: DragEvent) {
   if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
 }
 
-function onDragOver(_index: number, event: DragEvent) {
-  event.preventDefault()
-  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
-}
-
-/** 拖拽放置：把源图移动到目标位置 */
-function onDrop(index: number) {
-  const from = dragIndex.value
-  dragIndex.value = null
-  if (from == null || from === index) return
-  moveImage(from, index)
-}
-
 /** 移除指定位置的图片并释放其 bitmap */
 function removeImage(index: number) {
   const removed = images.value.splice(index, 1)[0]
+  if (selected.value === index) selected.value = null
   try {
     removed?.bitmap.close()
   } catch {
@@ -141,19 +191,46 @@ function removeImage(index: number) {
   doRender()
 }
 
-/** 将指定位置的图片移动到目标位置（拖拽 / 上移下移共用） */
+/** 将指定位置的图片移动到目标位置（拖拽换位共用） */
 function moveImage(from: number, to: number) {
   const arr = images.value
   const target = Math.max(0, Math.min(to, arr.length - 1))
   if (from === target) return
+  recordOrder()
   const moved = arr.splice(from, 1)[0]
   arr.splice(target, 0, moved)
   refreshPreviewUrls()
   doRender()
 }
 
-function moveImageByStep(index: number, delta: -1 | 1) {
-  moveImage(index, index + delta)
+// ---------- 排序撤销 / 重做 ----------
+// 只在排序前记录当前顺序快照（数组里存的是对象引用，零拷贝）。删除不入栈：
+// removeImage 会 close 掉那张图的 bitmap，不可逆，硬要还原只会出一张失效图。
+const orderHistory: LoadedImage[][] = []
+const redoHistory: LoadedImage[][] = []
+
+function recordOrder() {
+  orderHistory.push(images.value.slice())
+  redoHistory.length = 0
+  if (orderHistory.length > 50) orderHistory.shift()
+}
+
+function undoOrder() {
+  const prev = orderHistory.pop()
+  if (!prev) return
+  redoHistory.push(images.value.slice())
+  images.value = prev
+  refreshPreviewUrls()
+  doRender()
+}
+
+function redoOrder() {
+  const next = redoHistory.pop()
+  if (!next) return
+  orderHistory.push(images.value.slice())
+  images.value = next
+  refreshPreviewUrls()
+  doRender()
 }
 
 /** 重新生成本地预览 URL（图片增删排序后调用一次，避免 computed 全量重复 toDataURL） */
@@ -165,6 +242,19 @@ function refreshPreviewUrls() {
     canvas.getContext('2d')?.drawImage(img.bitmap, 0, 0)
     return canvas.toDataURL('image/png')
   })
+}
+
+/** 把指定图片旋转 / 翻转后重渲染，避免横向竖图混排在拼图里看着别扭 */
+async function rotateImage(index: number, action: 'r90' | 'flipH' | 'flipV') {
+  const img = images.value[index]
+  if (!img) return
+  try {
+    await applyRotFlip(img, action)
+    refreshPreviewUrls()
+    doRender()
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : '图片变换失败', 'error')
+  }
 }
 
 /** 根据当前模式与参数渲染拼图结果 */
@@ -183,7 +273,7 @@ function doRender() {
     } else {
       canvas = mergeImages(
         images.value.map((img) => img.bitmap),
-        { direction: direction.value },
+        { direction: direction.value, gap: gap.value, bg: currentBg.value },
       )
       canvas = fitCanvasRatio(canvas, currentRatio.value, fitMode.value)
     }
@@ -193,19 +283,7 @@ function doRender() {
   }
 }
 
-// 结果画布更新时同步到预览画布（避免 toDataURL 的大内存开销）
-// flush: 'post' 确保预览 canvas 已挂载（首次生成结果时 v-if 刚变为 true）
-watch(
-  resultCanvas,
-  (canvas) => {
-    const el = previewCanvas.value
-    if (!el || !canvas) return
-    el.width = canvas.width
-    el.height = canvas.height
-    el.getContext('2d')?.drawImage(canvas, 0, 0)
-  },
-  { flush: 'post' },
-)
+// 结果画布异步同步预览已移除：预览改为交互式图片网格（可拖拽换位），resultCanvas 仅用于导出
 
 function switchMode(m: 'grid' | 'merge') {
   if (mode.value === m) return
@@ -224,6 +302,17 @@ function saveResult() {
   const base = images.value.length === 1 ? images.value[0].name : mode.value === 'grid' ? '网格拼图' : '长图拼接'
   downloadCanvas(resultCanvas.value, `${base}.png`)
   showToast('已开始下载', 'success')
+}
+
+async function onPickNext(key: string) {
+  if (key !== 'compress' && key !== 'format') return
+  const files = await resultFiles()
+  const first = files[0]
+  if (!first) {
+    showToast('还没有可发送的拼图结果', 'error')
+    return
+  }
+  emit('navigate', key, first)
 }
 
 // 组件卸载时释放全部图片 bitmap
@@ -251,6 +340,7 @@ onUnmounted(() => {
       <div v-if="images.length === 0" class="empty-state">
         <div class="empty-icon" v-html="EMPTY_ICON"></div>
         <div>选择多张图片拼成网格 / 长图</div>
+        <p class="empty-hint">适合一次想发多张，拼成网格或长图再分享</p>
         <div class="empty-actions">
           <button class="btn btn-primary" style="width: 180px" @click="pickImages">选择图片</button>
           <button class="btn btn-sample" @click="loadSample">体验示例</button>
@@ -258,6 +348,76 @@ onUnmounted(() => {
       </div>
 
       <template v-else>
+        <!-- 拼图预览：交互式网格，直接拖动换位 -->
+        <div class="card">
+          <div class="card-title">
+            拼图预览（拖动换位）
+            <span class="order-actions">
+              <button class="mini-btn" title="撤销排序" aria-label="撤销排序" :disabled="orderHistory.length === 0" @click="undoOrder">↶</button>
+              <button class="mini-btn" title="重做" aria-label="重做" :disabled="redoHistory.length === 0" @click="redoOrder">↷</button>
+            </span>
+          </div>
+
+          <template v-if="mode === 'grid' && previewCellCount > 0">
+            <div
+              class="preview-grid"
+              :style="gridStyle"
+              @dragend="dragIndex = null; dragOverIndex = null"
+            >
+              <div
+                v-for="k in previewCellCount"
+                :key="k"
+                class="preview-cell"
+                :class="{ 'has-img': (k - 1) < previewUrls.length, 'drop-hint': dragOverIndex === (k - 1), 'selected': selected === (k - 1) }"
+                :draggable="(k - 1) < previewUrls.length"
+                @dragstart="onDragStart(k - 1, $event)"
+                @dragover="onPreviewDragOver(k - 1, $event)"
+                @dragleave="dragOverIndex = null"
+                @drop="onPreviewDrop(k - 1)"
+                @click="toggleSelect(k - 1)"
+              >
+                <img v-if="(k - 1) < previewUrls.length" :src="previewUrls[k - 1]" :alt="`第${k}张`" draggable="false" />
+                <span class="cell-no">{{ k }}</span>
+              </div>
+            </div>
+          </template>
+
+          <template v-else-if="mode === 'merge'">
+            <div
+              class="preview-strip"
+              :class="direction"
+              @dragend="dragIndex = null; dragOverIndex = null"
+            >
+              <div
+                v-for="(url, index) in previewUrls"
+                :key="index"
+                class="preview-cell strip-cell"
+                :class="{ 'drop-hint': dragOverIndex === index, 'selected': selected === index }"
+                draggable="true"
+                @dragstart="onDragStart(index, $event)"
+                @dragover="onPreviewDragOver(index, $event)"
+                @dragleave="dragOverIndex = null"
+                @drop="onPreviewDrop(index)"
+                @click="toggleSelect(index)"
+              >
+                <img :src="url" :alt="`第${index + 1}张`" draggable="false" />
+                <span class="cell-no">{{ index + 1 }}</span>
+              </div>
+            </div>
+          </template>
+
+          <!-- 预览区操作条：点选某一格后，旋转 / 翻转 / 删除 直接作用于该格 -->
+          <div v-if="selected !== null && selected < previewUrls.length" class="cell-actions-bar">
+            <span class="action-label">{{ selectedLabel }}</span>
+            <button class="action-btn" title="旋转 90°" aria-label="旋转 90°" @click="cellAction('r90')">↻</button>
+            <button class="action-btn" title="水平翻转" aria-label="水平翻转" @click="cellAction('flipH')">⇋</button>
+            <button class="action-btn" title="垂直翻转" aria-label="垂直翻转" @click="cellAction('flipV')">⇅</button>
+            <button class="action-btn danger" title="删除" aria-label="删除" @click="cellAction('delete')">✕</button>
+          </div>
+
+          <p class="tip-text">点选一张图片可旋转 / 翻转 / 删除，拖动图片直接换位。云端不参与，导出按原图实际尺寸保存。</p>
+        </div>
+
         <!-- 拼图设置 -->
         <div class="card">
           <div class="card-title">拼图设置</div>
@@ -313,6 +473,25 @@ onUnmounted(() => {
               </div>
             </div>
             <div class="form-row">
+              <span class="label">间距</span>
+              <input v-model.number="gap" type="range" min="0" max="40" step="1" style="flex: 1" @input="doRender" />
+              <span class="range-value">{{ gap }}px</span>
+            </div>
+            <div class="form-row">
+              <span class="label">背景色</span>
+              <div class="seg-control" style="flex: 1">
+                <div
+                  v-for="b in BGS"
+                  :key="b.key"
+                  class="seg-item"
+                  :class="{ active: bgKey === b.key }"
+                  @click="bgKey = b.key; doRender()"
+                >
+                  {{ b.label }}
+                </div>
+              </div>
+            </div>
+            <div class="form-row">
               <span class="label">画布比例</span>
               <div class="seg-control" style="flex: 1">
                 <div
@@ -336,39 +515,9 @@ onUnmounted(() => {
           </template>
         </div>
 
-        <!-- 已选图片列表 -->
-        <div class="card">
-          <div class="card-title">已选图片（{{ images.length }} 张）</div>
-          <div class="img-item-list">
-            <div
-              v-for="(url, index) in previewUrls"
-              :key="index"
-              class="img-item-row"
-              draggable="true"
-              @dragstart="onDragStart(index, $event)"
-              @dragover="onDragOver(index, $event)"
-              @drop="onDrop(index)"
-              @dragend="dragIndex = null"
-            >
-              <span class="drag-handle">⠿</span>
-              <span class="img-item-index">{{ index + 1 }}</span>
-              <img :src="url" :alt="`第${index + 1}张`" class="img-item-thumb" />
-              <div class="img-item-actions">
-                <button class="mini-btn" :disabled="index === 0" @click="moveImageByStep(index, -1)">↑</button>
-                <button class="mini-btn" :disabled="index === images.length - 1" @click="moveImageByStep(index, 1)">↓</button>
-                <button class="mini-btn danger" @click="removeImage(index)">✕</button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 拼图预览 -->
-        <div class="card">
-          <div class="card-title">拼图预览</div>
-          <div class="preview-wrap">
-            <canvas v-if="resultCanvas" ref="previewCanvas" class="merge-preview"></canvas>
-          </div>
-          <p class="tip-text">预览为压缩显示，保存的原图按实际尺寸导出。</p>
+        <!-- 跨工具接力入口 -->
+        <div v-if="resultCanvas" class="next-row">
+          <NextTools :options="NEXT_CHAIN" @pick="onPickNext" />
         </div>
       </template>
     </div>
@@ -425,109 +574,170 @@ onUnmounted(() => {
     radial-gradient(360px circle at 70% 30%, rgba(244, 114, 182, 0.1), transparent 55%);
 }
 
-/* 预览：宽高比自适应 + 限高，object-fit:contain 避免固定高度容器把内容纵向压扁 */
-.merge-preview {
-  display: block;
+/* 交互式拼图预览：网格布局，格子为可拖拽换位的方形图块 */
+.preview-grid {
+  display: grid;
   width: 100%;
-  height: auto;
   max-height: 62vh;
-  object-fit: contain;
   border-radius: 8px;
+  border: 1px solid rgba(31, 41, 55, 0.04);
+  overflow: hidden;
+}
+
+.preview-cell {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  min-height: 0;
+  overflow: hidden;
   background: var(--bg-page);
 }
 
-.img-item-list {
-  display: flex;
-  flex-direction: column;
-}
-
-.img-item-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
-  border-radius: 10px;
-}
-
-.img-item-row + .img-item-row {
-  border-top: 1px dashed var(--border);
-}
-
-.img-item-row[draggable='true']:active {
-  cursor: grabbing;
-}
-
-.drag-handle {
-  color: var(--text-sub);
-  font-size: 15px;
-  cursor: grab;
-  flex-shrink: 0;
+.preview-cell > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
   user-select: none;
+  -webkit-user-drag: none;
+  pointer-events: none;
 }
 
-.img-item-index {
-  width: 22px;
-  height: 22px;
+.preview-cell.has-img {
+  cursor: grab;
+}
+
+.preview-cell.selected {
+  outline: 2.5px solid var(--primary);
+  outline-offset: -2px;
+  z-index: 1;
+}
+
+.preview-cell.drop-hint {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.5);
+}
+
+.preview-cell .cell-no {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
-  background: var(--gradient-soft);
-  color: var(--primary);
-  font-size: 12px;
+  background: rgba(17, 24, 39, 0.5);
+  color: #fff;
+  font-size: 11px;
   font-weight: 600;
   display: flex;
   align-items: center;
   justify-content: center;
-  flex-shrink: 0;
+  pointer-events: none;
 }
 
-.img-item-thumb {
-  width: 56px;
-  height: 56px;
-  border-radius: 12px;
-  object-fit: cover;
-  flex-shrink: 0;
-  background: var(--bg-page);
-  border: 1px solid rgba(255, 255, 255, 0.9);
-  box-shadow: 0 2px 8px rgba(31, 41, 55, 0.08);
-}
-
-.img-item-actions {
+/* 长图模式：竖排满宽 / 横排滚动条 */
+.preview-strip {
   display: flex;
-  gap: 6px;
-  margin-left: auto;
+  gap: 8px;
+}
+
+.preview-strip.vertical {
+  flex-direction: column;
+}
+
+.preview-strip.horizontal {
+  flex-direction: row;
+  overflow-x: auto;
+  padding-bottom: 6px;
+}
+
+.preview-strip .preview-cell {
+  aspect-ratio: auto;
+  border-radius: 8px;
+  border: 1px solid rgba(31, 41, 55, 0.04);
+}
+
+.preview-strip.vertical .strip-cell > img {
+  object-fit: contain;
+  max-height: 52vh;
+}
+
+.preview-strip.horizontal .strip-cell {
+  min-width: 150px;
+  max-width: 150px;
+}
+
+.preview-strip.horizontal .strip-cell > img {
+  object-fit: cover;
+}
+
+.range-value {
+  min-width: 40px;
+  font-size: 12px;
+  color: var(--text-sub);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 预览区操作条：点选格子后出现，旋转 / 翻转 / 删除直接作用于该格 */
+.cell-actions-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: var(--gradient-soft);
+}
+
+.action-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--primary);
+  margin-right: auto;
   flex-shrink: 0;
 }
 
-.mini-btn {
-  width: 30px;
-  height: 30px;
+.action-btn {
+  width: 34px;
+  height: 34px;
   border: none;
-  border-radius: 9px;
-  background: var(--bg-page);
+  border-radius: 10px;
+  background: #fff;
   border: 1px solid var(--border);
   color: var(--text-sub);
-  font-size: 14px;
+  font-size: 15px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   transition: transform 0.15s;
+  flex-shrink: 0;
 }
 
-.mini-btn:active {
+.action-btn:active {
   transform: scale(0.92);
 }
 
-.mini-btn:disabled {
-  opacity: 0.4;
-  pointer-events: none;
-}
-
-.mini-btn.danger {
+.action-btn.danger {
   color: var(--danger);
 }
 
-/* PC 宽屏：双栏尺寸走 .tool-page 默认规则，这里覆盖比例并自定义落位——
-   设置与图片列表在左栏上下叠放，拼图预览独占右栏 */
+/* 卡片标题行放排序撤销/重做：主标题左、按钮右，窄屏不换行 */
+.card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.order-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* PC 宽屏：双栏——设置独占左栏，拼图预览占据右栏 */
 @media (min-width: 768px) {
   .page-content.tool-page {
     --pane-left: 1fr;
@@ -540,26 +750,8 @@ onUnmounted(() => {
   }
 
   .page-content .card:nth-child(2) {
-    grid-column: 1;
-    grid-row: 2;
-  }
-
-  .page-content .card:nth-child(3) {
     grid-column: 2;
-    grid-row: 1 / span 2;
-  }
-
-  .img-item-row {
-    transition: background 0.2s, transform 0.2s;
-  }
-
-  .img-item-row + .img-item-row {
-    margin-top: 4px;
-  }
-
-  .img-item-row:hover {
-    background: rgba(244, 246, 252, 0.8);
-    transform: translateY(-2px);
+    grid-row: 1;
   }
 }
 </style>

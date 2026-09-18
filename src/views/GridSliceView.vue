@@ -1,16 +1,29 @@
 <script setup lang="ts">
-import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useImageDrop } from '../composables/useImageDrop'
 import { loadImageFromFile, downloadCanvas, canvasToFile, type LoadedImage } from '../utils/imageLoader'
 import { saveMany } from '../utils/zip'
 import ShareButton from '../components/ShareButton.vue'
 import { sliceGrid, buildSlicePreview, buildSliceFilename, type SliceResult } from '../utils/gridSlice'
+import { applyRotFlip } from '../utils/rotflip'
 import { showToast } from '../utils/toast'
+import { usePref } from '../utils/prefs'
 import { fetchSampleFile } from '../utils/sampleImage'
+import NextTools from '../components/NextTools.vue'
 
-const emit = defineEmits<{ back: []; consumed: [] }>()
+const emit = defineEmits<{
+  back: []
+  consumed: []
+  navigate: [view: 'compress' | 'format', file: File]
+}>()
 
 const props = defineProps<{ incomingFile?: File | null }>()
+
+/** 切出来单块可直送下一步：压缩体积或转格式，不必重新选图 */
+const NEXT_CHAIN: { key: 'compress' | 'format'; label: string }[] = [
+  { key: 'compress', label: '压体积' },
+  { key: 'format', label: '转格式' },
+]
 
 // 全站拖拽上传：把图片拖到页面任意位置导入当前工具
 useImageDrop((files) => {
@@ -20,10 +33,23 @@ useImageDrop((files) => {
 const fileInput = ref<HTMLInputElement | null>(null)
 const source = ref<LoadedImage | null>(null)
 const sourceCanvas = ref<HTMLCanvasElement | null>(null)
-const rows = ref(3)
-const cols = ref(3)
-const gap = ref(0)
-const transparent = ref(false)
+/** 原图预览区（含可选裁方选区的定位参照） */
+const cropStageRef = ref<HTMLElement | null>(null)
+/**
+ * 裁方选区的左上角位置（相对原图宽/高的 0~1 分数）。
+ * 仅当「裁成正方形」开启且图非正方形时显示，让用户自己选保留哪一块，
+ * 而不总是居中裁切丢掉左右/上下内容。
+ */
+const gridCrop = ref({ fx: 0, fy: 0 })
+const rows = usePref('grid.rows', 3)
+const cols = usePref('grid.cols', 3)
+const gap = usePref('grid.gap', 0)
+const transparent = usePref('grid.transparent', false)
+/**
+ * 发朋友圈时每张是按正方形展示的：非方图直接切，每块是长条，九张会被裁成方形而错乱。
+ * 默认先把原图居中裁成正方形再切，每块严格 1:1、无缝拼回，观感才整齐。
+ */
+const squareCrop = usePref('grid.squareCrop', true)
 const slices = ref<SliceResult[]>([])
 const sliceUrls = ref<string[]>([])
 const slicePreviewCanvas = ref<HTMLCanvasElement | null>(null)
@@ -68,6 +94,7 @@ async function processFile(file: File) {
   source.value = await loadImageFromFile(file)
   await nextTick() // 等待原图预览画布挂载后再绘制
   drawSource()
+  resetGridCrop()
   slices.value = []
   sliceUrls.value = []
   gridMode.value = '3x3'
@@ -112,14 +139,120 @@ function applyPreset(preset: { key: string; rows: number; cols: number }) {
   doSlice()
 }
 
+/** 旋转 / 翻转源图后立即重新切分 */
+async function transformSource(action: 'r90' | 'flipH' | 'flipV') {
+  if (!source.value) return
+  try {
+    await applyRotFlip(source.value, action)
+    await nextTick()
+    drawSource()
+    resetGridCrop()
+    slices.value = []
+    sliceUrls.value = []
+    doSlice()
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : '图片变换失败', 'error')
+  }
+}
+
 function switchToCustom() {
   gridMode.value = 'custom'
 }
 
-function doSlice() {
+/** 裁方选区的边长相对原图宽高（长边对应 1，短边对应 size/min 的分数） */
+const gridCropSize = computed(() => {
+  const s = source.value
+  if (!s) return { sw: 1, sh: 1 }
+  const size = Math.min(s.width, s.height)
+  return { sw: size / s.width, sh: size / s.height }
+})
+
+/** 是否显示可拖动的裁方选区：只有开了「裁成正方形」且图确实非方时才需要 */
+const showGridCrop = computed(
+  () => squareCrop.value && !!source.value && source.value.width !== source.value.height,
+)
+
+/** 选区的绝对定位样式（相对原图预览容器） */
+const gridCropStyle = computed(() => {
+  const { sw, sh } = gridCropSize.value
+  return {
+    left: `${gridCrop.value.fx * 100}%`,
+    top: `${gridCrop.value.fy * 100}%`,
+    width: `${sw * 100}%`,
+    height: `${sh * 100}%`,
+  }
+})
+
+/** 把选区重置到居中 */
+function resetGridCrop() {
+  const s = source.value
+  if (!s) return
+  const { sw, sh } = gridCropSize.value
+  gridCrop.value = { fx: (1 - sw) / 2, fy: (1 - sh) / 2 }
+}
+
+/** 拖拽选区：指针落点记下起点，移动时按容器尺寸换算成分数并夹紧到可选范围内 */
+let gcDrag: { x: number; y: number; fx: number; fy: number } | null = null
+
+function onGridCropDown(event: PointerEvent) {
+  if (!showGridCrop.value) return
+  event.preventDefault()
+  gcDrag = {
+    x: event.clientX,
+    y: event.clientY,
+    fx: gridCrop.value.fx,
+    fy: gridCrop.value.fy,
+  }
+  cropStageRef.value?.setPointerCapture(event.pointerId)
+}
+
+function onGridCropMove(event: PointerEvent) {
+  if (!gcDrag) return
+  const stage = cropStageRef.value
+  if (!stage) return
+  const rect = stage.getBoundingClientRect()
+  if (rect.width <= 0 || rect.height <= 0) return
+  const { sw, sh } = gridCropSize.value
+  const dx = (event.clientX - gcDrag.x) / rect.width
+  const dy = (event.clientY - gcDrag.y) / rect.height
+  gridCrop.value = {
+    fx: Math.min(1 - sw, Math.max(0, gcDrag.fx + dx)),
+    fy: Math.min(1 - sh, Math.max(0, gcDrag.fy + dy)),
+  }
+}
+
+function onGridCropUp() {
+  if (!gcDrag) return
+  gcDrag = null
+  doSlice()
+}
+
+/** 开关「裁成正方形」时回到居中重切；拖拽松手在 onGridCropUp 里重切 */
+watch(squareCrop, (on) => {
+  if (on) resetGridCrop()
+})
+
+async function doSlice() {
   if (!source.value) return
+  let use: ImageBitmap = source.value.bitmap
+  const disposed: ImageBitmap[] = []
   try {
-    const result = sliceGrid(source.value.bitmap, {
+    // 开启「裁成正方形」时先把源图裁方再切，保证每块是 1:1。
+    // 非方图默认居中，用户可拖动选区自定义保留哪一块（见 gridCrop）。
+    if (squareCrop.value && source.value.width !== source.value.height) {
+      const { width: srcW, height: srcH } = source.value
+      const size = Math.min(srcW, srcH)
+      const sx = Math.floor(Math.min(1 - gridCropSize.value.sw, Math.max(0, gridCrop.value.fx)) * srcW)
+      const sy = Math.floor(Math.min(1 - gridCropSize.value.sh, Math.max(0, gridCrop.value.fy)) * srcH)
+      const crop = document.createElement('canvas')
+      crop.width = size
+      crop.height = size
+      crop.getContext('2d')?.drawImage(source.value.bitmap, sx, sy, size, size, 0, 0, size, size)
+      const buf = await createImageBitmap(crop)
+      use = buf
+      disposed.push(buf)
+    }
+    const result = sliceGrid(use, {
       rows: rows.value,
       cols: cols.value,
       gap: gap.value,
@@ -130,6 +263,14 @@ function doSlice() {
     sliceUrls.value = result.map((s) => s.canvas.toDataURL('image/png'))
   } catch (error) {
     showToast(error instanceof Error ? error.message : '切图失败', 'error')
+  } finally {
+    disposed.forEach((b) => {
+      try {
+        b.close()
+      } catch {
+        /* 已关闭，忽略 */
+      }
+    })
   }
 }
 
@@ -187,6 +328,18 @@ async function sliceFiles(): Promise<File[]> {
   return files
 }
 
+/** 切块直送下一步：送第一块即可，不必在下一个工具里重新选图 */
+async function onPickNext(key: string) {
+  if (key !== 'compress' && key !== 'format') return
+  const files = await sliceFiles()
+  const first = files[0]
+  if (!first) {
+    showToast('还没有可发送的切块', 'error')
+    return
+  }
+  emit('navigate', key, first)
+}
+
 async function saveAll() {
   if (!source.value || slices.value.length === 0) return
   const files = await sliceFiles()
@@ -236,6 +389,7 @@ onUnmounted(() => {
       <div v-if="!source" class="empty-state">
         <div class="empty-icon" v-html="EMPTY_ICON"></div>
         <div>选择一张图片开始切图</div>
+        <p class="empty-hint">适合把一张大图切成九宫格发朋友圈</p>
         <div class="empty-actions">
           <button class="btn btn-primary" style="width: 180px" @click="pickImage">选择图片</button>
           <button class="btn btn-sample" @click="loadSample">体验示例图</button>
@@ -247,10 +401,46 @@ onUnmounted(() => {
         <div class="card">
           <div class="card-title">原图</div>
           <div class="preview-wrap">
-            <canvas
-              ref="sourceCanvas"
-              style="max-width: 100%; max-height: 220px"
-            ></canvas>
+            <div ref="cropStageRef" class="crop-stage">
+              <canvas
+                ref="sourceCanvas"
+                style="max-width: 100%; max-height: 220px"
+              ></canvas>
+              <div
+                v-if="showGridCrop"
+                class="grid-crop-box"
+                :style="gridCropStyle"
+                @pointerdown="onGridCropDown"
+                @pointermove="onGridCropMove"
+                @pointerup="onGridCropUp"
+                @pointercancel="onGridCropUp"
+              >
+                <div
+                  v-for="i in cols - 1"
+                  :key="'v' + i"
+                  class="gc-line vert"
+                  :style="{ left: `${(i / cols) * 100}%` }"
+                ></div>
+                <div
+                  v-for="j in rows - 1"
+                  :key="'h' + j"
+                  class="gc-line horiz"
+                  :style="{ top: `${(j / rows) * 100}%` }"
+                ></div>
+                <span class="gc-handle"></span>
+              </div>
+            </div>
+          </div>
+          <p v-if="showGridCrop" class="tip-text" style="text-align: center; margin-top: 8px">
+            非方图默认居中，拖动方框选择要保留的区域
+          </p>
+          <div class="form-row" style="margin-top: 10px">
+            <span class="label">方向</span>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap">
+              <button class="btn btn-outline btn-sm" @click="transformSource('r90')">↻ 旋转 90°</button>
+              <button class="btn btn-outline btn-sm" @click="transformSource('flipH')">水平翻转</button>
+              <button class="btn btn-outline btn-sm" @click="transformSource('flipV')">垂直翻转</button>
+            </div>
           </div>
         </div>
 
@@ -307,15 +497,19 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div class="form-row">
-            <span class="label">透明背景</span>
-            <input
-              v-model="transparent"
-              type="checkbox"
-              style="width: 22px; height: 22px; accent-color: var(--primary)"
-              @change="doSlice"
-            />
+          <div class="opts-block">
+            <label class="opt-row">
+              <input v-model="squareCrop" type="checkbox" @change="doSlice" />
+              <span class="opt-text">裁成正方形<small>发朋友圈更整齐</small></span>
+            </label>
+            <label class="opt-row">
+              <input v-model="transparent" type="checkbox" @change="doSlice" />
+              <span class="opt-text">透明背景</span>
+            </label>
           </div>
+          <p v-if="squareCrop" class="tip-text" style="margin-top: 4px">
+            非方图开启后先裁成正方形再切：可在上方原图上拖动方框选择保留的区域。
+          </p>
         </div>
 
         <!-- 切分结果 -->
@@ -328,7 +522,11 @@ onUnmounted(() => {
             </div>
             <button class="btn btn-outline btn-full" @click="saveFull">保存完整图</button>
           </div>
-          <div class="slice-grid" :style="{ gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: `${gap > 0 ? Math.min(gap, 12) : 4}px` }">
+          <div
+            class="slice-grid"
+            :class="{ 'nibble-square': squareCrop }"
+            :style="{ gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: '2px' }"
+          >
             <img
               v-for="(url, index) in sliceUrls"
               :key="index"
@@ -341,6 +539,11 @@ onUnmounted(() => {
           <p class="tip-text">
             点击单块可查看大图，弹层内可单独下载。「保存全部」只触发一次下载：多张会打成一个 ZIP，手机上不再需要逐张允许。
           </p>
+
+          <!-- 切块直送下一步：压缩 / 转格式，不必重新选图 -->
+          <div v-if="sliceUrls.length" class="next-row">
+            <NextTools :options="NEXT_CHAIN" @pick="onPickNext" />
+          </div>
         </div>
       </template>
     </div>
@@ -410,20 +613,127 @@ onUnmounted(() => {
 }
 .slice-grid {
   display: grid;
-  padding: 10px;
-  border-radius: 14px;
-  background: rgba(244, 246, 252, 0.75);
-  border: 1px solid rgba(255, 255, 255, 0.9);
+  grid-template-columns: repeat(3, 1fr);
+  padding: 2px;
+  border-radius: 10px;
+  background: #fff;
+  border: 1px solid rgba(31, 41, 55, 0.08);
+  /* 预览用极细缝模拟「切缝」，多几行栅格再读一次列数 */
+}
+
+/* 原图预览承载层：相对定位，尺寸贴合画布，供选区绝对定位参照 */
+.crop-stage {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  line-height: 0;
+}
+
+/* 可拖动的裁方选区：白框 + 虚线 + 外部压暗遮罩，拖动手感与图片编辑页裁切框一致 */
+.grid-crop-box {
+  position: absolute;
+  border: 2px solid #fff;
+  outline: 1px dashed rgba(79, 110, 247, 0.9);
+  box-shadow: 0 0 0 9999px rgba(31, 41, 55, 0.4);
+  box-sizing: border-box;
+  cursor: move;
+  touch-action: none;
+}
+
+/* 选区内的切缝参考线：与当前行列数对齐，预览每一块的落位 */
+.gc-line {
+  position: absolute;
+  background: rgba(255, 255, 255, 0.7);
+  z-index: 1;
+}
+.gc-line.vert {
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+.gc-line.horiz {
+  left: 0;
+  right: 0;
+  height: 1px;
+}
+
+/* 选区中心抓点：柔和示意可拖动，不喧宾夺主 */
+.gc-handle {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  transform: translate(-50%, -50%);
+  border: 2px solid rgba(255, 255, 255, 0.95);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1.5px rgba(79, 110, 247, 0.9);
+  background: transparent;
+  pointer-events: none;
+}
+
+/* 紧凑选项块：把「裁方 / 透明背景」两个复选框收拢成整齐一区，替代散落的独立行 */
+.opts-block {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.opt-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(31, 41, 55, 0.06);
+  cursor: pointer;
+  transition: background 0.16s, border-color 0.16s;
+}
+.opt-row:hover {
+  background: rgba(255, 255, 255, 0.95);
+  border-color: color-mix(in srgb, var(--primary) 30%, transparent);
+}
+.opt-row input[type='checkbox'] {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--primary);
+  flex-shrink: 0;
+}
+.opt-text {
+  font-size: 14px;
+  color: var(--text-main);
+  line-height: 1.3;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.opt-text small {
+  font-size: 12px;
+  color: var(--text-sub);
+  font-weight: 400;
+}
+
+@media (max-width: 480px) {
+  .opts-block {
+    grid-template-columns: 1fr;
+  }
 }
 
 .slice-item {
   width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 0;
+  background: #fff;
+  cursor: pointer;
+}
+
+/* 勾选「裁成正方形」时：每块严格按 1:1 展示；
+   未勾选时保持切块的原始宽高比（高度自适应），不再强行撑成方形 */
+.slice-grid.nibble-square .slice-item {
   aspect-ratio: 1;
   object-fit: cover;
-  border-radius: 8px;
-  background: #fff;
-  box-shadow: 0 2px 8px rgba(31, 41, 55, 0.1);
-  cursor: pointer;
 }
 
 /* PC：切块 hover 高亮 */
@@ -457,6 +767,13 @@ onUnmounted(() => {
 .btn-full {
   margin-top: 10px;
   width: 100%;
+}
+
+/* 接力段：与上方区块划清边界，全局「换个方式处理」样式一致 */
+.next-row {
+  margin: 2px 0 8px;
+  padding: 16px 2px 0;
+  border-top: 1px solid rgba(31, 41, 55, 0.06);
 }
 
 /* 大图预览弹层 */

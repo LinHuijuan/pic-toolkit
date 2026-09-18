@@ -10,6 +10,7 @@
  */
 
 import { shallowReactive } from 'vue'
+import { savePendingJob, clearPendingJob, loadPendingJob } from './jobPersist'
 
 export type AiJobStatus = 'idle' | 'running' | 'done' | 'error'
 
@@ -81,7 +82,8 @@ function clear(r: JobRecord) {
   r.promise = null
 }
 
-export function useAiJob<T>(key: string): AiJob<T> {
+/** 取或建某个任务 key 的记录（useAiJob 与 hydrateJob 共用） */
+function getRecord(key: string): JobRecord {
   let r = records.get(key)
   if (!r) {
     r = shallowReactive<JobRecord>({
@@ -99,7 +101,11 @@ export function useAiJob<T>(key: string): AiJob<T> {
     })
     records.set(key, r)
   }
-  const rec = r
+  return r
+}
+
+export function useAiJob<T>(key: string): AiJob<T> {
+  const rec = getRecord(key)
 
   function run(
     input: File,
@@ -117,6 +123,8 @@ export function useAiJob<T>(key: string): AiJob<T> {
     rec.variant = sig
     rec.status = 'running'
     startTicker(rec)
+    // 长任务强刷恢复：把输入缓到 IndexedDB（有体积上限与配额容错，失败也不影响主流程）
+    savePendingJob(key, input, sig).catch(() => {})
 
     const report: ReportProgress = (percent, stage) => {
       if (rec.runId !== runId) return
@@ -132,6 +140,7 @@ export function useAiJob<T>(key: string): AiJob<T> {
           rec.status = 'done'
           rec.percent = 100
           rec.elapsedMs = Date.now() - rec.startedAt
+          clearPendingJob(key).catch(() => {})
         }
         return result
       },
@@ -140,6 +149,7 @@ export function useAiJob<T>(key: string): AiJob<T> {
           rec.status = 'error'
           rec.error = error instanceof Error ? error.message : String(error)
           rec.elapsedMs = Date.now() - rec.startedAt
+          clearPendingJob(key).catch(() => {})
         }
         throw error
       },
@@ -175,4 +185,22 @@ export function useAiJob<T>(key: string): AiJob<T> {
     },
     run,
   }
+}
+
+/**
+ * 从持久化层恢复某个任务 key 的输入（强刷回来时在视图挂载前调用）。
+ * 若无待恢复记录则空操作；已有活动任务时不覆盖。
+ */
+export async function hydrateJob(key: string): Promise<void> {
+  const pending = await loadPendingJob(key)
+  if (!pending) return
+  const rec = getRecord(key)
+  if (rec.status !== 'idle') return
+  rec.input = pending.file
+  rec.variant = pending.variant
+  rec.status = 'running'
+  rec.percent = 0
+  rec.stage = ''
+  rec.startedAt = Date.now()
+  rec.elapsedMs = 0
 }

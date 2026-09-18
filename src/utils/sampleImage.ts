@@ -7,13 +7,13 @@
 export type SampleKind = 'scene' | 'person'
 
 const URLS: Record<SampleKind, string> = {
-  scene: `${import.meta.env.BASE_URL}examples/sample-scene.png`,
-  person: `${import.meta.env.BASE_URL}examples/sample-person.png`,
+  scene: `${import.meta.env.BASE_URL}examples/sample-scene.jpg`,
+  person: `${import.meta.env.BASE_URL}examples/sample-person.jpg`,
 }
 
 const NAMES: Record<SampleKind, string> = {
-  scene: '示例图片.png',
-  person: '示例人像.png',
+  scene: '示例图片.jpg',
+  person: '示例人像.jpg',
 }
 
 // 同一 kind 的 File 复用，避免重复网络请求
@@ -40,7 +40,7 @@ export async function fetchSampleFiles(kind: SampleKind, count = 2): Promise<Fil
     // 交替选用两种示例图，让多图结果更有层次
     const k: SampleKind = i % 2 === 0 ? kind : kind === 'scene' ? 'person' : 'scene'
     const f = await fetchSampleFile(k)
-    const unique = new File([f], `${i % 2 === 0 ? '示例图片' : '示例人像'}_${i + 1}.png`, {
+    const unique = new File([f], `${i % 2 === 0 ? '示例图片' : '示例人像'}_${i + 1}.jpg`, {
       type: f.type,
     })
     files.push(unique)

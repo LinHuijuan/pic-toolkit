@@ -19,6 +19,8 @@ export interface WatermarkOptions {
   position?: WatermarkPosition
   /** 平铺旋转角度（度） */
   angle?: number
+  /** 平铺稀疏程度：间距相对默认值的倍数（1=默认，越小越密、越大越疏） */
+  spacing?: number
   /** 单点模式下距边缘留白 */
   marginRatio?: number
   fontFamily?: string
@@ -38,6 +40,7 @@ const DEFAULT_OPTIONS: Required<Omit<WatermarkOptions, 'text' | 'xRatio' | 'yRat
   position: 'bottom-right',
   angle: -30,
   marginRatio: 0.05,
+  spacing: 1,
   fontFamily: 'sans-serif',
 }
 
@@ -51,6 +54,8 @@ export interface ImageWatermarkOptions {
   sizeRatio?: number
   /** 单点模式下距边缘留白 */
   marginRatio?: number
+  /** 平铺稀疏程度：间距相对默认值的倍数（1=默认，越小越密、越大越疏） */
+  spacing?: number
   /** 单点模式下 Logo 中心位置（相对图片 0~1 比例），设置后优先于 position 与 marginRatio */
   xRatio?: number
   yRatio?: number
@@ -62,6 +67,7 @@ const DEFAULT_IMAGE_OPTIONS: Required<Omit<ImageWatermarkOptions, 'xRatio' | 'yR
   position: 'bottom-right',
   sizeRatio: 0.2,
   marginRatio: 0.05,
+  spacing: 1,
 }
 
 /**
@@ -99,9 +105,9 @@ export function drawImageWatermark(
   ctx.globalAlpha = opts.opacity
 
   if (opts.mode === 'tile') {
-    // 平铺
-    const spacingX = logoW * 1.5
-    const spacingY = logoH * 2.2
+    // 平铺：间距随 spacing 缩放（<1 更密、>1 更疏）
+    const spacingX = logoW * 1.5 * opts.spacing
+    const spacingY = logoH * 2.2 * opts.spacing
     for (let x = -spacingX; x < w + spacingX; x += spacingX) {
       for (let y = -spacingY; y < h + spacingY; y += spacingY) {
         ctx.drawImage(logo, x, y, logoW, logoH)
@@ -182,7 +188,7 @@ export function drawWatermark(bitmap: ImageBitmap, options: WatermarkOptions): H
   ctx.globalAlpha = opts.opacity
 
   if (opts.mode === 'tile') {
-    drawTileWatermark(ctx, text, w, h, fontSize, opts.angle)
+    drawTileWatermark(ctx, text, w, h, fontSize, opts.angle, opts.spacing)
   } else {
     drawSingleWatermark(ctx, text, w, h, fontSize, opts.position, opts.marginRatio, opts.xRatio, opts.yRatio)
   }
@@ -199,14 +205,15 @@ function drawTileWatermark(
   h: number,
   fontSize: number,
   angle: number,
+  spacing: number,
 ): void {
   const metrics = ctx.measureText(text)
   const textW = metrics.width
   const textH = fontSize
 
-  // 计算平铺网格（保证任意旋转都能铺满）
-  const spacingX = textW + textW * 0.6
-  const spacingY = textH + textH * 2.2
+  // 计算平铺网格（保证任意旋转都能铺满）；间距随 spacing 缩放（<1 更密、>1 更疏）
+  const spacingX = (textW + textW * 0.6) * spacing
+  const spacingY = (textH + textH * 2.2) * spacing
   const rad = (angle * Math.PI) / 180
   const cos = Math.abs(Math.cos(rad))
   const sin = Math.abs(Math.sin(rad))

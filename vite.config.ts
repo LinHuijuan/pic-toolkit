@@ -8,12 +8,12 @@ export default defineConfig({
   plugins: [
     vue(),
     VitePWA({
-      registerType: 'autoUpdate',
+      registerType: 'prompt',
       includeAssets: ['icons/icon.svg'],
       manifest: {
         name: '图片工具箱',
         short_name: '图片工具箱',
-        description: '12 个纯前端本地图片工具：AI 抠图与证件照换底色、九宫格切图、批量水印、压缩、格式转换、长图与网格拼图、超分放大、美颜、局部改色。支持 HEIC 导入与 ZIP 批量导出，图片全程在本机处理、绝不上传，可离线使用',
+        description: '13 个纯前端本地图片工具：AI 抠图与证件照换底色、九宫格切图、批量水印、压缩、格式转换、长图与网格拼图、超分放大、美颜、局部改色、EXIF 查看与清除。支持 HEIC 导入与 ZIP 批量导出，图片全程在本机处理、绝不上传，可离线使用',
         lang: 'zh-CN',
         theme_color: '#4f6ef7',
         background_color: '#f5f6fa',

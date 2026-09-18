@@ -10,6 +10,7 @@
  */
 
 import { downloadBlob } from './imageLoader'
+import { pushRecentBatch } from './recent'
 
 export interface ZipEntry {
   /** 包内文件名，不能含路径分隔符（重名会自动加序号） */
@@ -136,6 +137,8 @@ export async function downloadZip(entries: ZipEntry[], filename: string): Promis
  */
 export async function saveMany(files: File[], zipName: string): Promise<void> {
   if (files.length === 0) return
+  // 每次导出都入「最近处理」，用户可回看、重下，而不必重跑一遍工具
+  pushRecentBatch(files, zipName)
   if (files.length === 1) {
     downloadBlob(files[0], files[0].name)
     return

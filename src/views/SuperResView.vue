@@ -1,15 +1,24 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useImageDrop } from '../composables/useImageDrop'
-import { loadImageFromFile, canvasToBlob, canvasToFile, downloadCanvas, type LoadedImage } from '../utils/imageLoader'
-import { useAiJob } from '../utils/aiJob'
+import { loadImageFromFile, canvasToBlob, canvasToFile, createPreviewUrl, downloadCanvas, type LoadedImage } from '../utils/imageLoader'
+import { saveMany } from '../utils/zip'
+import { useAiJob, hydrateJob } from '../utils/aiJob'
 import { upscaleImage, predictUpscaleOutput, MAX_INPUT_EDGE, SUPER_RESOLUTION_SCALE } from '../utils/superResolution'
 import { showToast } from '../utils/toast'
 import { formatDuration } from '../utils/format'
 import { fetchSmallSampleFile } from '../utils/sampleImage'
 import ShareButton from '../components/ShareButton.vue'
+import AiModelBanner from '../components/AiModelBanner.vue'
+import CopyButton from '../components/CopyButton.vue'
+import CompareSlider from '../components/CompareSlider.vue'
+import NextTools from '../components/NextTools.vue'
 
-const emit = defineEmits<{ back: []; consumed: [] }>()
+const emit = defineEmits<{
+  back: []
+  consumed: []
+  navigate: [view: 'compress', file: File]
+}>()
 const props = defineProps<{ incomingFile?: File | null }>()
 
 useImageDrop((files) => {
@@ -21,6 +30,8 @@ const source = ref<LoadedImage | null>(null)
 const sourceFileRef = ref<File | null>(null)
 const resultCanvas = ref<HTMLCanvasElement | null>(null)
 const resultUrl = ref('')
+/** 原图预览（前后对比用），objectURL，切图/卸载时释放 */
+const sourceUrl = ref('')
 const processing = ref(false)
 const job = useAiJob<HTMLCanvasElement>('upscale')
 const progress = computed(() => job.percent)
@@ -49,6 +60,11 @@ async function processFile(file: File) {
   try {
     sourceFileRef.value = file
     source.value = await loadImageFromFile(file)
+    if (sourceUrl.value) {
+      URL.revokeObjectURL(sourceUrl.value)
+      sourceUrl.value = ''
+    }
+    sourceUrl.value = await createPreviewUrl(source.value!.bitmap)
     resultCanvas.value = null
     outputInfo.value = null
     if (resultUrl.value) {
@@ -125,6 +141,91 @@ function handleFileChange(event: Event) {
   processFile(file)
 }
 
+/** 批量队列：只保留已编码的 File 与预览 URL，画布结果用完即弃，避免多张大图同时驻留内存 */
+interface UpscaleBatchItem {
+  name: string
+  url: string
+  blob: Blob
+}
+
+/** 一次上限：超分逐张分块推理较重，再多会把等待拖到不友好 */
+const MAX_BATCH = 10
+
+const batchInput = ref<HTMLInputElement | null>(null)
+const batchItems = ref<UpscaleBatchItem[]>([])
+const batchProcessing = ref(false)
+const batchDone = ref(0)
+const batchTotal = ref(0)
+/** 当前那张的推理进度（0~100） */
+const batchFilePercent = ref(0)
+
+function clearBatch() {
+  batchItems.value.forEach((item) => URL.revokeObjectURL(item.url))
+  batchItems.value = []
+  batchDone.value = 0
+  batchTotal.value = 0
+  batchFilePercent.value = 0
+}
+
+function pickBatch() {
+  batchInput.value?.click()
+}
+
+/** 把一组小图逐张放大到 4 倍，全部共用缓存的模型会话 */
+async function runUpscaleBatch(files: File[]) {
+  if (batchProcessing.value || files.length === 0) return
+  const list = files.slice(0, MAX_BATCH)
+  if (files.length > list.length) {
+    showToast(`一次最多 ${MAX_BATCH} 张，已取前 ${MAX_BATCH} 张`, 'error')
+  }
+  clearBatch()
+  batchProcessing.value = true
+  batchTotal.value = list.length
+  try {
+    for (const file of list) {
+      batchFilePercent.value = 0
+      try {
+        const image = await loadImageFromFile(file)
+        try {
+          const canvas = await upscaleImage(image.bitmap, (p) => (batchFilePercent.value = p))
+          const ratio = Math.round((canvas.width / image.width) * 10) / 10
+          const blob = await canvasToBlob(canvas, 'image/png', 1)
+          const name = `${image.name}_x${ratio}.png`
+          batchItems.value.push({ name, url: URL.createObjectURL(blob), blob })
+        } finally {
+          image.bitmap.close()
+        }
+      } catch {
+        showToast(`${file.name} 处理失败，已跳过`, 'error')
+      }
+      batchDone.value++
+      // 逐张让出主线程：批量多张时不能把页面锁死
+      await new Promise((r) => setTimeout(r, 0))
+    }
+  } finally {
+    batchProcessing.value = false
+    batchFilePercent.value = 0
+  }
+}
+
+function handleBatchChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  input.value = ''
+  runUpscaleBatch(files)
+}
+
+async function saveUpscaleBatch() {
+  const files = await batchFiles()
+  if (files.length === 0) return
+  await saveMany(files, '批量超分.zip')
+  showToast(files.length > 1 ? '已打包下载' : '已开始下载', 'success')
+}
+
+async function batchFiles(): Promise<File[]> {
+  return batchItems.value.map((item) => new File([item.blob], item.name, { type: item.blob.type }))
+}
+
 async function resultFiles(): Promise<File[]> {
   if (!source.value || !resultCanvas.value) return []
   const ratio = outputInfo.value?.ratio ?? SUPER_RESOLUTION_SCALE
@@ -138,19 +239,35 @@ function saveResult() {
   showToast('已开始下载', 'success')
 }
 
-onMounted(() => {
+/** 放大成果直送压缩，把体积压回可传的尺寸 */
+const NEXT_CHAIN: { key: 'compress'; label: string }[] = [{ key: 'compress', label: '压体积' }]
+
+async function onPickNext() {
+  const [file] = await resultFiles()
+  if (!file) {
+    showToast('还没有可发送的超分结果', 'error')
+    return
+  }
+  emit('navigate', 'compress', file)
+}
+
+onMounted(async () => {
   if (props.incomingFile) {
     processFile(props.incomingFile).catch(() => showToast('图片加载失败', 'error'))
     emit('consumed')
     return
   }
+  // 强刷回来先恢复可能进行中的任务，再判断是否要接着跑
+  await hydrateJob('upscale')
   const file = job.input
   if (file && job.status !== 'idle') restoreJob(file).catch(() => showToast('图片加载失败', 'error'))
 })
 
 onUnmounted(() => {
   disposed = true
+  clearBatch()
   if (resultUrl.value) URL.revokeObjectURL(resultUrl.value)
+  if (sourceUrl.value) URL.revokeObjectURL(sourceUrl.value)
 })
 </script>
 
@@ -162,9 +279,11 @@ onUnmounted(() => {
     </div>
 
     <div class="page-content tool-page">
+      <AiModelBanner />
       <div v-if="!source" class="empty-state">
         <div class="empty-icon" v-html="EMPTY_ICON"></div>
         <div>选一张小图（长边 {{ MAX_INPUT_EDGE }}px 内），本地放大 4 倍</div>
+        <p class="empty-hint">适合原图偏小或发糊、想放大 4 倍再发出去的场景</p>
         <p class="tip-text">首次需下载 4.9MB 模型，之后离线可用。</p>
         <div class="empty-actions">
           <button class="btn btn-primary" style="width: 180px" @click="pickImage">选择图片</button>
@@ -186,10 +305,10 @@ onUnmounted(() => {
               </p>
               <p class="tip-text">分块推理，进度会一块一块推进；切去别的工具也不会打断，回来接着看。</p>
             </div>
-            <!-- 完成后显示结果 -->
-            <div v-else-if="resultUrl && outputInfo" class="compare-wrap">
-              <img :src="resultUrl" alt="超分结果" class="result-img" />
-              <p class="tip-text">
+            <!-- 完成后显示前后对比 -->
+            <div v-else-if="resultUrl && sourceUrl && outputInfo">
+              <CompareSlider :before="sourceUrl" :after="resultUrl" before-label="原图" after-label="超分" />
+              <p class="tip-text" style="text-align: center; margin-top: 8px">
                 已输出 {{ outputInfo.w }} × {{ outputInfo.h }}（较原图 ×{{ outputInfo.ratio }}）。
                 <template v-if="outputInfo.capped">源图长边超出预算，为保证速度按 {{ MAX_INPUT_EDGE }}px 上限收敛后再放大。</template>
               </p>
@@ -207,18 +326,58 @@ onUnmounted(() => {
             <button v-if="!processing && !resultUrl" class="btn btn-primary" @click="run">开始超分</button>
           </div>
         </div>
+
+        <!-- 批量：调好模型，一次放大多张小图 -->
+        <div class="card">
+          <div class="card-title">批量超分</div>
+          <p class="tip-text">
+            一次给多张小图做同样的 4 倍放大（共用已缓存的模型）；保存全部时多张会打成一个 ZIP。
+          </p>
+          <button
+            class="btn btn-outline"
+            style="width: 100%"
+            :disabled="batchProcessing"
+            @click="pickBatch"
+          >
+            {{
+              batchProcessing
+                ? `正在放大 ${batchDone + 1} / ${batchTotal}（单张 ${batchFilePercent}%）…`
+                : '选择多张小图'
+            }}
+          </button>
+          <div v-if="batchItems.length > 0" class="batch-grid">
+            <img
+              v-for="item in batchItems"
+              :key="item.url"
+              class="batch-thumb"
+              :src="item.url"
+              :alt="item.name"
+            />
+          </div>
+          <div v-if="batchItems.length > 0 && !batchProcessing" class="batch-actions">
+            <button class="btn btn-ghost" @click="clearBatch">清空</button>
+            <button class="btn btn-primary" @click="saveUpscaleBatch">保存全部</button>
+          </div>
+        </div>
       </template>
     </div>
 
     <div v-if="source" class="bottom-bar">
       <button class="btn btn-ghost" @click="pickImage">重新选图</button>
       <ShareButton :get-files="resultFiles" variant="outline" :disabled="!resultUrl || processing" />
+      <CopyButton :get-files="resultFiles" variant="outline" :disabled="!resultUrl || processing" />
       <button class="btn btn-primary" :disabled="!resultUrl || processing" @click="saveResult">
         保存超分图{{ outputInfo ? `（x${outputInfo.ratio}）` : '' }}
       </button>
     </div>
 
+    <!-- 超分成果直送压缩 -->
+    <div v-if="resultUrl && !processing" class="next-row">
+      <NextTools :options="NEXT_CHAIN" @pick="onPickNext" />
+    </div>
+
     <input ref="fileInput" type="file" accept="image/*,.heic,.heif" style="display: none" @change="handleFileChange" />
+    <input ref="batchInput" type="file" accept="image/*,.heic,.heif" multiple style="display: none" @change="handleBatchChange" />
     <svg width="0" height="0" style="position: absolute" aria-hidden="true">
       <defs>
         <linearGradient id="icon-grad" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
@@ -278,5 +437,35 @@ onUnmounted(() => {
   display: flex;
   justify-content: center;
   margin-top: 12px;
+}
+
+.batch-grid {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 8px;
+}
+
+.batch-thumb {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 2px 8px rgba(31, 41, 55, 0.08);
+  background: #f1f3f9;
+}
+
+.batch-actions {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.next-row {
+  margin-top: 16px;
+  padding: 0 2px;
 }
 </style>

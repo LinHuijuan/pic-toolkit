@@ -24,6 +24,7 @@ export async function convertImageFormat(
   bitmap: ImageBitmap,
   format: OutputFormat,
   metadataFrom?: Blob,
+  qualityOverride?: number,
 ): Promise<FormatConvertResult> {
   let canvas = document.createElement('canvas')
   canvas.width = bitmap.width
@@ -56,7 +57,7 @@ export async function convertImageFormat(
         canvas = white
       }
       type = 'image/jpeg'
-      quality = JPEG_QUALITY
+      quality = qualityOverride ?? JPEG_QUALITY
       break
     case 'webp':
       type = 'image/webp'

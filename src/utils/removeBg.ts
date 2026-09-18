@@ -6,12 +6,13 @@
 import { detectInferenceDevice } from './device'
 
 /**
- * 抠图模型档位：isnet_quint8（42.3MB）。
- * @imgly 默认档 isnet_fp16（84.1MB），体积翻倍但抠图边缘提升有限，
- * 移动端首次加载会退化成分钟级等待，故显式降到量化版。
+ * 抠图模型档位：isnet_fp16（84.1MB）。
+ * fp16 保留 16 位浮点权重，出图边缘比 isnet_quint8（42.3MB 量化档）更干净，
+ * 发丝、轮廓这类细节丢失更少。虽然体积翻倍，但为了开箱抠图质量而选它；
+ * 体积只在首次下载体现，之后走本地缓存，不影响日常使用。
  * 预热与推理必须共用同一档，否则会各下载一份模型。
  */
-export const BG_MODEL = 'isnet_quint8' as const
+export const BG_MODEL = 'isnet_fp16' as const
 
 export interface RemoveBgProgress {
   percent: number
@@ -30,7 +31,7 @@ export async function removeImageBackground(
 ): Promise<Blob> {
   onProgress?.({ percent: 0, stage: '准备模型…' })
   // 按需动态加载 @imgly/background-removal：onnxruntime / wasm 仅在真正抠图时下载
-  // （首次约 800KB JS + 42MB 模型），首屏不占用体积与启动耗时。
+  // （首次约 800KB JS + 84MB 模型），首屏不占用体积与启动耗时。
   const { removeBackground } = await import('@imgly/background-removal')
 
   const device = await detectInferenceDevice()

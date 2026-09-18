@@ -12,7 +12,8 @@ import {
 import { removeImageBackground, composeBackground, composeBackgroundImage, loadCutoutCanvas } from '../utils/removeBg'
 import { DEFAULT_CUTOUT_STYLE, styleCutout } from '../utils/cutoutStyle'
 import { saveMany } from '../utils/zip'
-import { useAiJob } from '../utils/aiJob'
+import { useAiJob, hydrateJob } from '../utils/aiJob'
+import { aiStageLabel } from '../utils/aiStage'
 import { prepareAiModel } from '../utils/aiModel'
 import {
   ID_PHOTO_SPECS,
@@ -24,11 +25,23 @@ import {
 } from '../utils/idPhoto'
 import { canvasToPdfBlob } from '../utils/pdf'
 import { showToast } from '../utils/toast'
+import { usePref } from '../utils/prefs'
 import { fetchSampleFile } from '../utils/sampleImage'
 import CompareSlider from '../components/CompareSlider.vue'
+import AiModelBanner from '../components/AiModelBanner.vue'
 import ShareButton from '../components/ShareButton.vue'
 
-const emit = defineEmits<{ back: []; consumed: [] }>()
+const emit = defineEmits<{ back: []; consumed: []; navigate: [view: PhotoNextToolKey, file: File] }>()
+
+type PhotoNextToolKey = 'compress' | 'format' | 'grid'
+
+/** 证件照成品的自然去向：压缩体积、换格式、切图排版 */
+const NEXT_TOOLS: { key: PhotoNextToolKey; label: string }[] = [
+  { key: 'compress', label: '压缩' },
+  { key: 'format', label: '转换' },
+  { key: 'grid', label: '切图' },
+]
+const showNextTools = ref(false)
 
 const props = defineProps<{ incomingFile?: File | null }>()
 
@@ -52,8 +65,8 @@ const bgColor = ref<string | null>('#ffffff')
 const bgImageUrl = ref('')
 let bgImageEl: HTMLImageElement | null = null
 const bgFileInput = ref<HTMLInputElement | null>(null)
-const specKey = ref('')
-const sheetMode = ref(false)
+const specKey = usePref('idPhoto.specKey', '')
+const sheetMode = usePref('idPhoto.sheetMode', false)
 
 /** 自定义规格尺寸（mm），非法输入在 change 时纠正到 10~200 的合理打印范围 */
 const customW = ref(33)
@@ -186,7 +199,7 @@ async function loadSample() {
 
 // 接收其他工具流转过来的图片（如图片编辑 → 证件照）；
 // 没有新图时先看共享任务：切去别的工具再回来，进度和结果都还在
-onMounted(() => {
+onMounted(async () => {
   if (props.incomingFile) {
     processFile(props.incomingFile).catch((error) => {
       showToast(error instanceof Error ? error.message : '图片加载失败', 'error')
@@ -194,6 +207,8 @@ onMounted(() => {
     emit('consumed')
     return
   }
+  // 强刷回来先恢复可能进行中的任务，再判断是否要接着跑
+  await hydrateJob('idPhoto')
   const file = job.input
   if (file && job.status !== 'idle') restoreJob(file).catch(() => showToast('图片加载失败', 'error'))
 })
@@ -414,6 +429,15 @@ async function saveResult() {
   }
 }
 
+/** 导出当前证件照并跳转到目标工具继续处理 */
+function continueTo(key: PhotoNextToolKey) {
+  buildResultFile().then((file) => {
+    if (!file) return
+    showNextTools.value = false
+    emit('navigate', key, file)
+  })
+}
+
 async function exportPdf() {
   if (!source.value || !resultBlob.value || pdfBusy.value) return
   pdfBusy.value = true
@@ -491,16 +515,18 @@ onUnmounted(() => {
     </div>
 
     <div class="page-content tool-page">
+      <AiModelBanner />
       <!-- 未选图状态 -->
       <div v-if="!source" class="empty-state">
         <div class="empty-icon" v-html="EMPTY_ICON"></div>
         <div>选择一张人像照片，AI 自动抠图换底色</div>
+        <p class="empty-hint">适合自拍或手机照片一键出白 / 蓝 / 红底证件照</p>
         <div class="empty-actions">
           <button class="btn btn-primary" style="width: 180px" @click="pickImage">选择照片</button>
           <button class="btn btn-sample" @click="loadSample">体验示例图</button>
         </div>
         <p class="tip-text" style="max-width: 280px; text-align: center">
-          首次使用需下载 AI 模型（约 42MB），仅一次、之后可离线使用。全程本地处理，照片不会上传。
+          首次使用需下载 AI 模型（约 84MB 高清档），仅一次、之后可离线使用。全程本地处理，照片不会上传。
         </p>
       </div>
 
@@ -513,9 +539,9 @@ onUnmounted(() => {
               <div class="progress-inner" :style="{ width: progress.percent + '%' }"></div>
             </div>
             <div class="progress-text">
-              {{ progress.stage }} {{ progress.percent }}%
+                {{ aiStageLabel(progress.stage) }} {{ progress.percent }}%
+              </div>
             </div>
-          </div>
 
           <div v-else-if="resultReady" class="compare-wrap">
             <CompareSlider :before="sourceUrl" :after="resultUrl" before-label="原图" after-label="证件照" />
@@ -583,7 +609,14 @@ onUnmounted(() => {
             </div>
           </div>
           <p class="tip-text">换底后发丝边缘有白边残留时，把收缩调到 1~2 吃掉；羽化让边缘与新背景的过渡更柔。</p>
-          <div class="form-row">
+        </div>
+
+        <!-- 更多选项：规格 / 人物位置 / 多底色 / 打印等低频设置折叠，不挤占首屏 -->
+        <details class="card idt-more">
+          <summary class="card-title">
+            <span class="more-title">更多选项 <span class="more-hint">规格 · 人物位置 · 多底色 · 打印</span></span>
+          </summary>
+          <div class="form-row idt-more-body">
             <span class="label">多底色</span>
             <button class="btn btn-outline inline-btn" :disabled="multiBusy" @click="exportMultiBg">
               {{ multiBusy ? '生成中…' : '白/蓝/红 打包下载' }}
@@ -640,6 +673,7 @@ onUnmounted(() => {
                       @change="onCustomSizeInput('h', $event)"
                     />
                     <span class="spec-unit">mm</span>
+                    <span v-if="currentSpec" class="spec-px">≈ {{ currentSpec.width }}×{{ currentSpec.height }}px（300dpi）</span>
                   </template>
                 </div>
               </div>
@@ -697,15 +731,33 @@ onUnmounted(() => {
             {{ currentSpec ? `${currentSpec.label}规格输出 ${currentSpec.width}×${currentSpec.height} 像素（300dpi，约 ${currentSpec.mm[0]}×${currentSpec.mm[1]}mm），按规格居中裁切，请确保人像位于照片中央。` : '不限制输出尺寸，保持原图比例。' }}
             {{ sheetMode ? '一版多张为 6 寸相纸排版，可直接打印，也可导出打印 PDF。' : '' }}
           </p>
-        </div>
+        </details>
+        <p class="tip-text">需要指定证件照规格、微调人物位置，或一键出三种底色时，展开上面的「更多选项」。</p>
 
         <p v-if="processing" class="tip-text">全程本地处理，切去别的工具也不会打断，回来接着看。</p>
+
+        <!-- 继续处理：把成品喂给下一个工具 -->
+        <div v-if="showNextTools && resultReady" class="card">
+          <div class="card-title">继续处理</div>
+          <div style="display: flex; flex-wrap: wrap; gap: 8px">
+            <button
+              v-for="tool in NEXT_TOOLS"
+              :key="tool.key"
+              class="btn btn-outline"
+              style="flex: 1; min-width: 80px"
+              @click="continueTo(tool.key)"
+            >
+              {{ tool.label }}
+            </button>
+          </div>
+        </div>
       </template>
     </div>
 
     <!-- 底部操作栏 -->
     <div v-if="source" class="bottom-bar">
       <button class="btn btn-ghost" @click="pickImage">重新选图</button>
+      <button v-if="resultReady" class="btn btn-outline" @click="showNextTools = !showNextTools">继续处理</button>
       <ShareButton v-if="resultReady" :get-files="resultFiles" variant="outline" />
       <button v-if="!resultReady" class="btn btn-primary" :disabled="processing" @click="startRemove">
         {{ processing ? '处理中…' : '开始处理' }}
@@ -834,6 +886,13 @@ onUnmounted(() => {
   color: var(--text-sub);
 }
 
+/* 自定义尺寸实时像素提示：一眼看出输出够不够清晰 */
+.spec-px {
+  font-size: 12px;
+  color: var(--text-sub);
+  white-space: nowrap;
+}
+
 /* 卡片内联导出按钮（打印 PDF / 多底色）：不占底栏 */
 .inline-btn {
   width: auto;
@@ -955,5 +1014,49 @@ onUnmounted(() => {
   .page-content.tool-page {
     --pane-left: 1.2fr;
   }
+}
+
+/* 折叠的「更多选项」卡片：默认收起，点开才释放低频设置 */
+.idt-more summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.idt-more summary::-webkit-details-marker {
+  display: none;
+}
+
+.idt-more summary::after {
+  content: '▾';
+  color: var(--text-sub);
+  font-size: 15px;
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+
+.idt-more[open] summary::after {
+  transform: rotate(180deg);
+}
+
+.idt-more[open] .card-title {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+}
+
+.more-title {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.more-hint {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-sub);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>
