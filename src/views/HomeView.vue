@@ -241,10 +241,16 @@ function pickSearch(key: ToolKey) {
          隐私承诺与 AI 模型状态都收在这一屏里，首屏要留给工具卡片 -->
     <div class="home-header">
       <div class="home-logo">
+        <!-- 品牌 logo：负空间工具箱（掀盖 + 魔法星，与 favicon/PWA 图标同源） -->
         <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="3.5" y="3.5" width="17" height="17" rx="3.5" />
-          <circle cx="9" cy="9.5" r="1.8" />
-          <path d="m5.5 18.5 4.5-4.5 3 3 3.5-3.5 2 2" />
+          <g transform="rotate(-4 12 7)">
+            <path d="M8.8 5.2 C8.8 2.6 15.2 2.6 15.2 5.2" />
+            <rect x="3.8" y="5" width="16.4" height="3.6" rx="1.8" fill="#fff" stroke="none" />
+          </g>
+          <rect x="3.5" y="9.8" width="17" height="10.7" rx="2.6" />
+          <path d="M3.5 12.9 H20.5" stroke-width="1.5" />
+          <rect x="10.7" y="11.6" width="2.6" height="2.6" rx="0.9" fill="#fff" stroke="none" />
+          <path d="M19.4 1.6 Q19.9 3.7 22 4.2 Q19.9 4.7 19.4 6.8 Q18.9 4.7 16.8 4.2 Q18.9 3.7 19.4 1.6 Z" fill="#fff" stroke="none" />
         </svg>
       </div>
       <h1 class="home-title">图片不用上传，就能抠图、换底色、切九宫格</h1>
